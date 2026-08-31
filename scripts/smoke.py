@@ -33,8 +33,13 @@ def main():
     )
     party_code = json.loads(secret)["party_code"]
     headers = {"Origin": url}
+    device_id = str(uuid.uuid4())
+    epoch = hashlib.sha256(party_code.upper().replace("-", "").replace(" ", "").encode()).hexdigest()
+    device_key = hashlib.sha256(f"{epoch}:{device_id}".encode()).hexdigest()
     ids = [str(uuid.uuid4()) for _ in range(4)]
-    (ROOT / ".local/smoke-ids.json").write_text(json.dumps(ids))
+    (ROOT / ".local/smoke-ids.json").write_text(
+        json.dumps({"photo_ids": ids, "device_key": device_key}, indent=2)
+    )
     payloads = []
     for index in range(4):
         image = Image.new("RGB", (300, 400), (index * 60, 80, 120))
@@ -45,8 +50,18 @@ def main():
     with httpx.Client(base_url=url, timeout=300, headers=headers) as client:
         assert client.get("/").status_code == 200
         assert client.get("/api/photos").status_code == 401
-        assert client.post("/api/session", json={"code": party_code}).status_code == 200
-        print("HTTPS and session checks passed", flush=True)
+        login = client.post(
+            "/api/session", json={"code": party_code, "device_id": device_id}
+        )
+        assert login.status_code == 200
+        assert login.json()["user"] is None
+        created = client.post("/api/users/me", json={"name": "FotoVibe Smoke Test"})
+        assert created.status_code == 200, created.text
+        user = created.json()["user"]
+        assert user["id"] == "u_" + device_key[:16]
+        assert user["device_id"] == "d_" + device_key[:12]
+        assert user["values"] == {"photos_uploaded": 0}
+        print("HTTPS, session and device profile checks passed", flush=True)
 
         def upload(index):
             return client.post(
@@ -61,7 +76,12 @@ def main():
             for response in responses:
                 assert response.status_code == 201, response.text
             assert upload(0).status_code == 200
-            print("4 concurrent uploads including HEIC and duplicate retry passed", flush=True)
+            profile = client.get("/api/session").json()["user"]
+            assert profile["values"] == {"photos_uploaded": 4}
+            print(
+                "4 concurrent uploads, duplicate retry and per-device count passed",
+                flush=True,
+            )
             for index, photo_id in enumerate(ids):
                 original = client.get(f"/api/photos/{photo_id}/original")
                 assert original.status_code == 200
@@ -102,8 +122,23 @@ def main():
                 for photo_id in ids
                 for variant in ["original", "display.jpg", "thumb.jpg"]
             ]
+            objects += [
+                f"gs://{bucket}/users/{device_key}.json",
+                f"gs://{bucket}/users/{device_key}/reconciled-authors-v1.json",
+                *[
+                    f"gs://{bucket}/users/{device_key}/uploads/{photo_id}.json"
+                    for photo_id in ids
+                ],
+            ]
             result = subprocess.run(
-                ["gcloud", "storage", "rm", *objects, f"--project={project}", "--quiet"],
+                [
+                    "gcloud",
+                    "storage",
+                    "rm",
+                    *objects,
+                    f"--project={project}",
+                    "--quiet",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -113,7 +148,11 @@ def main():
                     "Some synthetic objects could not be removed. See .local/smoke-ids.json. "
                     + result.stderr
                 )
-            print("Synthetic cloud test photos removed (7-day soft delete applies)", flush=True)
+            print(
+                "Synthetic cloud test photos and device profile removed "
+                "(7-day soft delete applies)",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

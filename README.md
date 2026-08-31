@@ -12,10 +12,11 @@ Upload-Bestätigung.
 - Foto-Bucket: `gs://fotovibe-520703150508-photos`
 - Aufgaben: Firestore Native, benannte Datenbank `fotovibe` in Frankfurt;
   Dokumente unter `tasks/<schlüssel>` mit `text` und `enabled`
-- Secret: `fotovibe-auth` (Code und Sitzungsschlüssel; Replikation Frankfurt)
+- Secret: `fotovibe-auth` (Party-Code, Sitzungsschlüssel und Admin-Geräte-IDs;
+  Replikation Frankfurt)
 - Laufzeitidentität: `fotovibe-runtime`, Objekt-Erstellung/-Lesen nur im Foto-Bucket
-  sowie lesender Firestore-Zugriff und Zugriff auf das Auth-Secret. Keine
-  Löschrechte, keine Schlüsseldateien.
+  sowie Firestore-Zugriff zum Lesen und Verwalten von Foto-Aufgaben und Zugriff
+  auf das Auth-Secret. Keine Löschrechte im Foto-Bucket, keine Schlüsseldateien.
 - Build-Identität: `fotovibe-build`, dokumentierte Rolle `roles/run.builder`.
 - Cloud Build und Artifact Registry werden nur für Builds/Image-Ablage benötigt.
   Quellarchive ab sieben Tagen werden entfernt; in Artifact Registry bleiben
@@ -71,7 +72,9 @@ Build wegen verzögerter Berechtigungsübernahme fehlschlagen; nach einigen Minu
 denselben Befehl wiederholen. Keine zusätzlichen pauschalen Editor-Rechte vergeben.
 
 Der Build verwendet das Dockerfile und die Lockfiles. `.gcloudignore` und
-`.dockerignore` schließen lokale Daten, Testbilder und Secrets aus.
+`.dockerignore` schließen lokale Daten, Testbilder und Secrets aus. Das
+Deployment bricht vor dem Cloud Build ab, falls eine lokale Paket-Proxy-URL in
+den Build-Dateien steht und aus der Google-Cloud-Umgebung nicht erreichbar wäre.
 Die erzeugte URL steht nach Erfolg in `.local/deployment.json`.
 
 ```sh
@@ -111,6 +114,13 @@ Die zehn Ausgangsaufgaben stehen in `infra/tasks.json`. Beim Deployment werden
 nur fehlende Dokumente angelegt; bereits in Firestore geänderte Texte bleiben
 erhalten. Die Website liefert Aufgaben ausschließlich nach erfolgreicher Anmeldung
 und berücksichtigt nur Dokumente mit `enabled=true`.
+
+Gäste können im Profilmenü eigene Freitext-Aufgaben hinzufügen. Diese werden
+sofort als aktive Aufgabe gespeichert und stehen damit direkt allen Gästen zur
+Auswahl. Im Admin-Panel gibt es zusätzlich den Tab „Aufgaben“: Dort lassen sich
+alle vorhandenen Aufgaben anlegen, bearbeiten oder löschen. Die Aufgaben liegen
+in Firestore (lokal in `.local/tasks.json`); das Deployment richtet dafür den
+schreibenden Firestore-Zugriff der Laufzeitidentität ein.
 
 Mit der vorhandenen gcloud-Anmeldung lassen sich Aufgaben ohne neues Deployment
 verwalten:
@@ -155,6 +165,20 @@ Erzeugt einen neuen zehnstelligen Code samt Sitzungsschlüssel und deployt ihn.
 Damit müssen sich alle Gäste erneut anmelden. Fotos bleiben erhalten.
 Eine private lokale Kopie neu erzeugter Secrets liegt in `.local/auth.json`
 (Dateirechte `0600`, nicht für Git/Build vorgesehen).
+
+## Admins und ausgeblendete Fotos
+
+Die Admin-IDs stehen als `admin_device_ids` im Auth-Secret. Die App vergleicht
+sie mit der im Profil angezeigten Geräte-ID; die Werte sind keine Namen und
+werden serverseitig geprüft. Nach einer Änderung der Liste `make deploy`
+ausführen, damit Cloud Run eine neue Secret-Version verwendet.
+
+Admins sehen im Profilmenü das Admin-Panel. Es zeigt registrierte Gäste,
+deren Nutzer- und Geräte-ID, Upload-Zähler sowie kleine Vorschaubilder ihrer
+Fotos. „Aus Galerie entfernen“ schreibt nur eine unveränderliche
+Ausblend-Markierung unter `hidden/<UUID>.json`. Original, Anzeigeversion,
+Thumbnail und veröffentlichter Bilddatensatz bleiben im Bucket erhalten, das
+Foto verschwindet aber aus Galerie und Fotobuch.
 
 ## Fotos und Datenschutz
 

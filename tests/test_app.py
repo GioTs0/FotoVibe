@@ -28,6 +28,35 @@ class TestTaskStore:
         return self.tasks
 
 
+class MutableTestTaskStore:
+    def __init__(self, tasks=()):
+        self.tasks = [dict(task) for task in tasks]
+
+    def enabled(self):
+        return [{"id": task["id"], "text": task["text"]} for task in self.tasks if task["enabled"]]
+
+    def all(self):
+        return [dict(task) for task in self.tasks]
+
+    def create(self, text):
+        task = {"id": f"party-{len(self.tasks) + 1}", "text": text.strip(), "enabled": True}
+        self.tasks.append(task)
+        return dict(task)
+
+    def upsert(self, task_id, text, enabled=True):
+        for index, task in enumerate(self.tasks):
+            if task["id"] == task_id:
+                updated = {"id": task_id, "text": text.strip(), "enabled": enabled}
+                self.tasks[index] = updated
+                return dict(updated)
+        raise ValueError("missing")
+
+    def delete(self, task_id):
+        before = len(self.tasks)
+        self.tasks = [task for task in self.tasks if task["id"] != task_id]
+        return len(self.tasks) != before
+
+
 def picture(fmt="JPEG", color="red", orientation=None):
     # HEIF's encoder normalizes the orientation tag; provide already-oriented pixels.
     image = Image.new("RGB", (80, 120) if fmt == "HEIF" and orientation == 6 else (120, 80), color)
@@ -182,6 +211,80 @@ def test_named_device_restores_session_and_authors_photos(env):
     assert client.get("/api/photos").status_code == 200
 
 
+def test_photo_reactions_comments_and_fuzzy_gallery_search(tmp_path):
+    tasks = TestTaskStore(
+        [{"id": "partygesicht", "text": "Zeig dein bestes Partygesicht."}]
+    )
+    app = create_app(Settings("TEST-CODE", "test-signing-key"), LocalStore(tmp_path), tasks)
+    author = TestClient(app, base_url="https://testserver")
+    guest = TestClient(app, base_url="https://testserver")
+    login_device(author, str(uuid.uuid4()))
+    login_device(guest, str(uuid.uuid4()))
+    author_user = author.post("/api/users/me", json={"name": "Lea Sommer"}, headers=ORIGIN)
+    guest_user = guest.post("/api/users/me", json={"name": "Mara"}, headers=ORIGIN)
+    assert author_user.status_code == guest_user.status_code == 200
+
+    photo_id = str(uuid.uuid4())
+    assert upload(author, photo_id=photo_id, task_id="partygesicht").status_code == 201
+    assert guest.post(
+        f"/api/photos/{photo_id}/reactions", json={"emoji": "❤️"}, headers=ORIGIN
+    ).status_code == 200
+    # The immutable reaction event is idempotent for this device and emoji.
+    reaction = guest.post(
+        f"/api/photos/{photo_id}/reactions", json={"emoji": "❤️"}, headers=ORIGIN
+    )
+    assert reaction.status_code == 200
+    assert reaction.json()["reactions"] == [{"emoji": "❤️", "count": 1}]
+    assert reaction.json()["mine"] == ["❤️"]
+    removed = guest.post(
+        f"/api/photos/{photo_id}/reactions",
+        json={"emoji": "❤️", "active": False},
+        headers=ORIGIN,
+    )
+    assert removed.status_code == 200
+    assert removed.json()["reactions"] == []
+    assert removed.json()["mine"] == []
+    restored = guest.post(
+        f"/api/photos/{photo_id}/reactions",
+        json={"emoji": "❤️", "active": True},
+        headers=ORIGIN,
+    )
+    assert restored.status_code == 200
+    assert restored.json()["reactions"] == [{"emoji": "❤️", "count": 1}]
+    assert guest.post(
+        f"/api/photos/{photo_id}/comments",
+        json={"text": "  Was  für ein toller Moment!  "},
+        headers=ORIGIN,
+    ).status_code == 200
+
+    details = author.get(f"/api/photos/{photo_id}/interactions")
+    assert details.status_code == 200
+    assert details.json()["comments"] == [
+        {
+            "author": {"id": guest_user.json()["user"]["id"], "name": "Mara"},
+            "text": "Was für ein toller Moment!",
+            "created_at": details.json()["comments"][0]["created_at"],
+        }
+    ]
+    listed = author.get("/api/photos").json()["photos"]
+    assert listed[0]["interactions"] == {
+        "reactions": [{"emoji": "❤️", "count": 1}],
+        "comments_count": 1,
+    }
+    assert [photo["id"] for photo in author.get("/api/photos", params={"q": "Leea"}).json()["photos"]] == [
+        photo_id
+    ]
+    assert [photo["id"] for photo in author.get("/api/photos", params={"q": "Partygsicht"}).json()["photos"]] == [
+        photo_id
+    ]
+    assert guest.post(
+        f"/api/photos/{photo_id}/reactions", json={"emoji": "🤖"}, headers=ORIGIN
+    ).status_code == 400
+    assert guest.post(
+        f"/api/photos/{photo_id}/comments", json={"text": "   "}, headers=ORIGIN
+    ).status_code == 400
+
+
 def test_user_upload_value_is_idempotent_and_recovers_interrupted_marker(env, monkeypatch):
     client, _, store = env
     login_device(client, str(uuid.uuid4()))
@@ -220,6 +323,110 @@ def test_unknown_device_cannot_restore_and_name_is_set_once(env):
     assert client.post("/api/users/me", json={"name": "A"}, headers=ORIGIN).status_code == 400
     assert client.post("/api/users/me", json={"name": "Mara"}, headers=ORIGIN).status_code == 200
     assert client.post("/api/users/me", json={"name": "Nora"}, headers=ORIGIN).status_code == 409
+
+
+def test_admin_can_hide_photos_and_review_every_registered_user(tmp_path):
+    store = LocalStore(tmp_path)
+    admin_device = str(uuid.uuid4())
+    epoch = hashlib.sha256(b"TESTCODE").hexdigest()
+    admin_key = hashlib.sha256(f"{epoch}:{admin_device}".encode()).hexdigest()
+    app = create_app(
+        Settings(
+            "TEST-CODE",
+            "test-signing-key",
+            True,
+            (),
+            ("d_" + admin_key[:12],),
+        ),
+        store,
+    )
+    admin = TestClient(app, base_url="https://testserver")
+    guest = TestClient(app, base_url="https://testserver")
+
+    login_device(admin, admin_device)
+    admin_user = admin.post("/api/users/me", json={"name": "Alex"}, headers=ORIGIN).json()["user"]
+    assert admin_user["is_admin"] is True
+
+    login_device(guest, str(uuid.uuid4()))
+    guest_user = guest.post("/api/users/me", json={"name": "Bea"}, headers=ORIGIN).json()["user"]
+    photo_id = str(uuid.uuid4())
+    assert upload(guest, photo_id=photo_id).status_code == 201
+
+    assert guest.get("/api/admin/overview").status_code == 403
+    assert guest.post(f"/api/admin/photos/{photo_id}/hide", headers=ORIGIN).status_code == 403
+    overview = admin.get("/api/admin/overview")
+    assert overview.status_code == 200
+    users = {user["id"]: user for user in overview.json()["users"]}
+    assert users[admin_user["id"]]["is_admin"] is True
+    assert users[guest_user["id"]]["values"] == {
+        "photos_uploaded": 1,
+        "photos_visible": 1,
+        "photos_hidden": 0,
+    }
+    assert users[guest_user["id"]]["photos"][0]["id"] == photo_id
+
+    hidden = admin.post(f"/api/admin/photos/{photo_id}/hide", headers=ORIGIN)
+    assert hidden.status_code == 200
+    assert hidden.json() == {"id": photo_id, "hidden": True, "already_hidden": False}
+    assert admin.post(f"/api/admin/photos/{photo_id}/hide", headers=ORIGIN).json()[
+        "already_hidden"
+    ] is True
+    assert guest.get("/api/photos").json()["photos"] == []
+    assert store.read(f"published/{photo_id}.json") is not None
+    assert store.read(f"photos/{photo_id}/original") is not None
+    hidden_user = {
+        user["id"]: user for user in admin.get("/api/admin/overview").json()["users"]
+    }[guest_user["id"]]
+    assert hidden_user["values"]["photos_hidden"] == 1
+    assert hidden_user["photos"][0]["hidden"] is True
+
+
+def test_users_can_add_tasks_and_admins_can_manage_them(tmp_path):
+    store = LocalStore(tmp_path)
+    admin_device = str(uuid.uuid4())
+    epoch = hashlib.sha256(b"TESTCODE").hexdigest()
+    admin_key = hashlib.sha256(f"{epoch}:{admin_device}".encode()).hexdigest()
+    tasks = MutableTestTaskStore(
+        [{"id": "bestehend", "text": "Bestehende Aufgabe", "enabled": True}]
+    )
+    app = create_app(
+        Settings("TEST-CODE", "test-signing-key", True, (), ("d_" + admin_key[:12],)),
+        store,
+        tasks,
+    )
+    admin = TestClient(app, base_url="https://testserver")
+    guest = TestClient(app, base_url="https://testserver")
+
+    login_device(admin, admin_device)
+    assert admin.post("/api/users/me", json={"name": "Alex"}, headers=ORIGIN).status_code == 200
+    login_device(guest, str(uuid.uuid4()))
+    assert guest.post("/api/users/me", json={"name": "Bea"}, headers=ORIGIN).status_code == 200
+
+    created = guest.post("/api/tasks", json={"text": "  Ein Gruppenfoto mit Lachen  "}, headers=ORIGIN)
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    assert created.json() == {
+        "id": task_id,
+        "text": "Ein Gruppenfoto mit Lachen",
+        "enabled": True,
+    }
+    assert guest.post("/api/tasks", json={"text": "   "}, headers=ORIGIN).status_code == 400
+    assert guest.get("/api/admin/tasks").status_code == 403
+    assert guest.patch(f"/api/admin/tasks/{task_id}", json={"text": "Nein"}, headers=ORIGIN).status_code == 403
+    assert guest.delete(f"/api/admin/tasks/{task_id}", headers=ORIGIN).status_code == 403
+
+    listed = admin.get("/api/admin/tasks")
+    assert listed.status_code == 200
+    assert {task["id"] for task in listed.json()["tasks"]} == {"bestehend", task_id}
+    updated = admin.patch(
+        f"/api/admin/tasks/{task_id}",
+        json={"text": "Ein Gruppenfoto mit lautem Lachen"},
+        headers=ORIGIN,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["text"] == "Ein Gruppenfoto mit lautem Lachen"
+    assert admin.delete("/api/admin/tasks/bestehend", headers=ORIGIN).status_code == 204
+    assert admin.get("/api/admin/tasks").json()["tasks"] == [updated.json()]
 
 
 @pytest.mark.parametrize("fmt", ["JPEG", "PNG", "WEBP", "HEIF"])
@@ -371,6 +578,17 @@ def test_task_snapshot_is_stored_with_photo_and_listed(env):
     assert original_metadata["fotovibe_metadata"]
     play_photo = client.get("/api/photos/play", params={"count": 1}).json()["photos"][0]
     assert play_photo["task"] == task
+
+
+def test_gallery_exposes_photo_dimensions_for_format_aware_previews(env):
+    client, _, _ = env
+    login(client)
+
+    record = upload(client, picture()).json()
+    listed = client.get("/api/photos").json()["photos"][0]
+
+    assert (listed["width"], listed["height"]) == (record["width"], record["height"])
+    assert listed["width"] > listed["height"]
 
 
 def test_gallery_reads_task_metadata_from_older_original_object(tmp_path):

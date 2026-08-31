@@ -17,11 +17,51 @@ SERVICE = "fotovibe"
 BUCKET = "fotovibe-520703150508-photos"
 AUTH_SECRET = "fotovibe-auth"
 TEST_CODE = "1234"
+ADMIN_DEVICE_IDS = ("d_df9eabe35ce8", "d_41b14e411f97")
 FIRESTORE_DATABASE = "fotovibe"
 DNS_ZONE = "zone-180-foto-com"
 DOMAINS = ("180-foto.com", "www.180-foto.com")
 RUNTIME = f"fotovibe-runtime@{PROJECT}.iam.gserviceaccount.com"
 BUILDER = f"fotovibe-build@{PROJECT}.iam.gserviceaccount.com"
+
+
+def normalize_public_dependency_sources():
+    """Repair lockfile URLs copied from the local-only Python proxy."""
+    path = ROOT / "uv.lock"
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    normalized = content.replace(
+        "https://cdproxy.sportradar.online/pypi/simple", "https://pypi.org/simple"
+    ).replace(
+        "https://cdproxy.sportradar.online/pypi/packages/packages/",
+        "https://files.pythonhosted.org/packages/",
+    )
+    if normalized != content:
+        path.write_text(normalized, encoding="utf-8")
+        print("Normalized uv.lock to public Python package URLs.", flush=True)
+
+
+def verify_public_dependency_sources():
+    """Fail locally when a machine-only package proxy leaked into build inputs."""
+    build_inputs = (
+        "uv.lock",
+        "package-lock.json",
+        ".npmrc",
+        "pyproject.toml",
+        "package.json",
+        "Dockerfile",
+        ".gitlab-ci.yml",
+    )
+    for name in build_inputs:
+        path = ROOT / name
+        if path.exists() and "cdproxy.sportradar.online" in path.read_text(encoding="utf-8"):
+            raise RuntimeError(
+                f"{path.name} contains the local dependency proxy cdproxy.sportradar.online. "
+                "See DEPENDENCY_SOURCES.md and regenerate the lockfile for the public registry "
+                "before deploying, for example: env -u UV_DEFAULT_INDEX uv lock "
+                "--default-index https://pypi.org/simple"
+            )
 
 
 def gc(*args, live=False, missing_ok=False):
@@ -87,7 +127,7 @@ def ensure_firestore():
         "add-iam-policy-binding",
         PROJECT,
         f"--member=serviceAccount:{RUNTIME}",
-        "--role=roles/datastore.viewer",
+        "--role=roles/datastore.user",
         "--condition=None",
     )
     subprocess.run(
@@ -196,6 +236,8 @@ def main():
         help="Create a fresh code and invalidate all existing sessions",
     )
     args = parser.parse_args()
+    normalize_public_dependency_sources()
+    verify_public_dependency_sources()
     os.umask(0o077)
     local = ROOT / ".local"
     local.mkdir(exist_ok=True)
@@ -288,6 +330,7 @@ def main():
             "party_code": code[:5] + "-" + code[5:],
             "session_key": secrets.token_urlsafe(48),
             "test_codes": [TEST_CODE],
+            "admin_device_ids": list(ADMIN_DEVICE_IDS),
         }
         auth_path.write_text(json.dumps(values))
         auth_path.chmod(0o600)
@@ -312,8 +355,19 @@ def main():
             isinstance(code, str) for code in configured_test_codes
         ):
             raise RuntimeError("Existing auth secret has invalid test_codes")
+        changed = False
         if TEST_CODE not in configured_test_codes:
             values["test_codes"] = [*configured_test_codes, TEST_CODE]
+            changed = True
+        configured_admin_device_ids = values.get("admin_device_ids")
+        if configured_admin_device_ids is None:
+            values["admin_device_ids"] = list(ADMIN_DEVICE_IDS)
+            changed = True
+        elif not isinstance(configured_admin_device_ids, list) or not all(
+            isinstance(device_id, str) for device_id in configured_admin_device_ids
+        ):
+            raise RuntimeError("Existing auth secret has invalid admin_device_ids")
+        if changed:
             auth_path.write_text(json.dumps(values))
             auth_path.chmod(0o600)
             gc("secrets", "versions", "add", AUTH_SECRET, f"--data-file={auth_path}")

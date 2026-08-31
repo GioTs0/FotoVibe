@@ -20,14 +20,22 @@
       <div id="profile-control" class="profile-control" hidden>
         <button id="profile-button" class="profile-button" type="button" aria-expanded="false" aria-controls="profile-menu"><span id="profile-initial" class="profile-initial" aria-hidden="true">?</span><span class="sr-only">Profil öffnen</span></button>
         <div id="profile-menu" class="profile-menu" hidden>
-          <p class="profile-label">Angemeldet als</p><strong id="profile-name"></strong>
+          <p class="profile-label">Angemeldet als</p><strong id="profile-name"></strong><span id="profile-admin-badge" class="admin-badge" hidden>Admin</span>
           <dl class="profile-details">
             <div><dt>Nutzer-ID</dt><dd><code id="profile-user-id"></code></dd></div>
             <div><dt>Geräte-ID</dt><dd><code id="profile-device-id"></code></dd></div>
             <div class="profile-value"><dt>Hochgeladene Fotos</dt><dd id="profile-upload-count">0</dd></div>
           </dl>
+          <button id="task-add-open" class="secondary task-add-open" type="button">Aufgabe hinzufügen</button>
+          <form id="task-add-form" class="task-add-form" hidden>
+            <label for="task-add-input">Neue Foto-Aufgabe</label>
+            <textarea id="task-add-input" maxlength="500" rows="3" placeholder="Zum Beispiel: Mach ein Foto mit deinem Lieblingsmenschen."></textarea>
+            <p id="task-add-error" class="error" role="alert"></p>
+            <p id="task-add-status" class="hint" role="status"></p>
+            <div class="task-add-actions"><button id="task-add-submit" class="primary" type="submit">Aufgabe speichern</button><button id="task-add-cancel" class="text-button" type="button">Abbrechen</button></div>
+          </form>
           <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="Dunkelmodus einschalten" title="Dunkelmodus einschalten"><svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.2A8.5 8.5 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg><svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><span id="theme-label">Dunkel</span></button>
-          <div class="admin-placeholder"><span>Admin-Panel</span><p>Die Verwaltungsfunktionen folgen hier als Nächstes.</p></div>
+          <button id="admin-open" class="secondary admin-open" type="button" hidden>Admin-Panel öffnen</button>
           <button id="profile-logout" class="text-button" type="button">Abmelden</button>
         </div>
       </div>
@@ -93,11 +101,7 @@
       <section id="camera-view" class="capture-screen camera-view" hidden aria-labelledby="camera-title" aria-modal="true" role="dialog">
         <h2 id="camera-title" class="sr-only">Kamera</h2>
         <div id="camera-frame" class="camera-frame"><video id="camera-video" autoplay muted playsinline aria-label="Live-Vorschau der Kamera"></video></div>
-        <div class="capture-topbar">
-          <button id="close-camera" class="capture-icon-button" type="button" aria-label="Kamera schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
-          <p id="camera-status" class="capture-status" role="status">Kamera wird geöffnet …</p>
-          <button id="switch-camera" class="capture-icon-button" type="button" hidden aria-label="Kamera drehen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-4V3"/><path d="M4 17h4v4"/><path d="M6.6 8.2A7 7 0 0 1 18.8 7M5.2 17A7 7 0 0 0 17.4 15.8"/></svg></button>
-        </div>
+        <p id="camera-status" class="sr-only" role="status">Kamera wird geöffnet …</p>
         <aside id="camera-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
           <span class="capture-task-handle" aria-hidden="true">⠿</span>
           <div><span>Foto-Aufgabe</span><p id="camera-task-text"></p></div>
@@ -105,8 +109,10 @@
         </aside>
         <button id="camera-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
         <div class="capture-bottombar camera-controls">
-          <button id="camera-fallback" class="capture-fallback" type="button" hidden>Gerätekamera öffnen</button>
+          <button id="close-camera" class="capture-icon-button" type="button" aria-label="Kamera schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
           <button id="shutter" class="shutter" type="button" disabled aria-label="Foto aufnehmen"><span aria-hidden="true"></span></button>
+          <button id="switch-camera" class="capture-icon-button" type="button" hidden aria-label="Kamera wechseln"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-4V3"/><path d="M4 17h4v4"/><path d="M6.6 8.2A7 7 0 0 1 18.8 7M5.2 17A7 7 0 0 0 17.4 15.8"/></svg></button>
+          <button id="camera-fallback" class="capture-fallback" type="button" hidden>Gerätekamera öffnen</button>
         </div>
       </section>
       <section id="review" class="capture-screen capture-review" hidden aria-labelledby="review-title" aria-modal="true" role="dialog">
@@ -136,6 +142,7 @@
     <section id="gallery" class="gallery" hidden aria-labelledby="gallery-title">
       <div id="gallery-overview">
         <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><div class="gallery-actions"><a id="play-link" class="button primary" href="/play?autoplay=1">Fotobuch starten <span aria-hidden="true">▶</span></a><button id="refresh" class="secondary" type="button">Aktualisieren</button></div></div>
+        <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen" aria-describedby="gallery-search-hint"><small id="gallery-search-hint">Findet auch ähnliche Schreibweisen.</small></label>
         <p class="muted" id="gallery-status" role="status">Die Fotos werden geladen …</p>
         <p id="gallery-error" class="error" role="alert"></p>
         <div id="gallery-empty" class="empty" hidden><h2>Der erste Moment fehlt noch.</h2><p>Mach den Anfang und teile ein Foto von der Party.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
@@ -151,8 +158,31 @@
           <span>Foto-Aufgabe</span>
           <p id="detail-task-text"></p>
         </aside>
+        <section id="detail-interactions" class="detail-interactions" aria-labelledby="detail-interactions-title">
+          <h2 id="detail-interactions-title">Reaktionen</h2>
+          <div id="detail-reaction-options" class="reaction-options" aria-label="Mit Emoji reagieren"></div>
+          <div id="detail-reaction-counts" class="reaction-counts" aria-live="polite"></div>
+        </section>
+        <section class="detail-comments" aria-labelledby="detail-comments-title">
+          <h2 id="detail-comments-title">Kommentare</h2>
+          <div id="detail-comments" class="comment-list" aria-live="polite"></div>
+          <form id="detail-comment-form" class="comment-form">
+            <label class="sr-only" for="detail-comment-input">Kommentar schreiben</label>
+            <textarea id="detail-comment-input" maxlength="500" rows="3" placeholder="Einen Kommentar schreiben …"></textarea>
+            <p id="detail-comment-error" class="error" role="alert"></p>
+            <button id="detail-comment-submit" class="primary" type="submit">Kommentieren</button>
+          </form>
+        </section>
         <a id="download" class="button primary" download>Original herunterladen <span aria-hidden="true">↓</span></a>
+        <button id="detail-hide" class="secondary admin-hide-action" type="button" hidden>Aus Galerie entfernen</button>
       </div>
+    </section>
+    <section id="admin" class="admin-page" hidden aria-labelledby="admin-title">
+      <div class="admin-heading"><div><p class="eyebrow">Verwaltung</p><h1 id="admin-title">Party im Überblick.</h1><p id="admin-status" class="muted" role="status">Daten werden geladen …</p></div><button id="admin-back" class="secondary" type="button">← Zurück</button></div>
+      <div class="admin-tabs" role="tablist" aria-label="Admin-Bereiche"><button id="admin-users-tab" type="button" role="tab" aria-selected="true" aria-controls="admin-users-pane">Gäste</button><button id="admin-tasks-tab" type="button" role="tab" aria-selected="false" aria-controls="admin-tasks-pane">Aufgaben</button></div>
+      <p id="admin-error" class="error" role="alert"></p>
+      <section id="admin-users-pane" role="tabpanel" aria-labelledby="admin-users-tab"><label class="admin-search" for="admin-search"><span>Gäste durchsuchen</span><input id="admin-search" type="search" autocomplete="off" placeholder="Name, Nutzer- oder Geräte-ID suchen" aria-describedby="admin-search-hint"><small id="admin-search-hint">Durchsucht alle registrierten Party-Gäste.</small></label><div id="admin-summary" class="admin-summary" hidden></div><div id="admin-users" class="admin-users"></div><p id="admin-empty" class="admin-empty" hidden>Keine passenden Gäste gefunden.</p></section>
+      <section id="admin-tasks-pane" role="tabpanel" aria-labelledby="admin-tasks-tab" hidden><form id="admin-task-create-form" class="admin-task-create"><label for="admin-task-create-input">Neue Foto-Aufgabe</label><textarea id="admin-task-create-input" maxlength="500" rows="3" placeholder="Eine Aufgabe für die Party schreiben …"></textarea><button id="admin-task-create-submit" class="primary" type="submit">Aufgabe hinzufügen</button></form><p id="admin-tasks-status" class="muted" role="status"></p><div id="admin-tasks" class="admin-tasks"></div><p id="admin-tasks-empty" class="admin-empty" hidden>Noch keine Aufgaben vorhanden.</p></section>
     </section>
     <section id="play" class="play-page" hidden aria-labelledby="play-title">
       <div class="play-heading">

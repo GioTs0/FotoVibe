@@ -10,6 +10,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -35,6 +36,16 @@ SESSION_AGE = 7 * 24 * 60 * 60
 COOKIE = "fotovibe_session"
 TASK_ID_PATTERN = re.compile(r"[a-z0-9-]{1,100}")
 NAME_MAX_LENGTH = 40
+ADMIN_DEVICE_ID_PATTERN = re.compile(r"d_[a-f0-9]{12}")
+DEFAULT_ADMIN_DEVICE_IDS = ("d_df9eabe35ce8", "d_41b14e411f97")
+REACTIONS = {
+    "heart": "❤️",
+    "laugh": "😂",
+    "love": "😍",
+    "clap": "👏",
+    "fire": "🔥",
+}
+COMMENT_MAX_LENGTH = 500
 log = logging.getLogger("fotovibe")
 
 
@@ -117,12 +128,57 @@ def author_from_record(record, metadata=None):
     return {"id": user_id, "name": name}
 
 
+def search_key(value):
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return value.casefold()
+
+
+def typo_distance(left, right):
+    """Small, bounded Levenshtein calculation for party-gallery search words."""
+    if abs(len(left) - len(right)) > 2:
+        return 3
+    previous = list(range(len(right) + 1))
+    for index, left_char in enumerate(left, start=1):
+        current = [index]
+        for column, right_char in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (left_char != right_char),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def fuzzy_matches(query, value):
+    query = search_key(query).strip()
+    value = search_key(value)
+    if not query:
+        return True
+    if query in value:
+        return True
+    words = re.findall(r"[\w]+", value)
+    for word in re.findall(r"[\w]+", query):
+        if not any(
+            word in candidate
+            or candidate in word
+            or (len(word) >= 4 and typo_distance(word, candidate) <= (1 if len(word) < 7 else 2))
+            for candidate in words
+        ):
+            return False
+    return True
+
+
 @dataclass
 class Settings:
     party_code: str
     session_key: str
     secure_cookies: bool = True
     test_codes: tuple[str, ...] = ()
+    admin_device_ids: tuple[str, ...] = DEFAULT_ADMIN_DEVICE_IDS
 
     @classmethod
     def from_env(cls):
@@ -134,13 +190,26 @@ class Settings:
                 isinstance(code, str) for code in test_codes
             ):
                 raise RuntimeError("test_codes in AUTH_SECRET_FILE must be a list of strings")
-            return cls(values["party_code"], values["session_key"], True, tuple(test_codes))
+            admin_device_ids = values.get("admin_device_ids", list(DEFAULT_ADMIN_DEVICE_IDS))
+            if not isinstance(admin_device_ids, list) or not all(
+                isinstance(device_id, str) and ADMIN_DEVICE_ID_PATTERN.fullmatch(device_id)
+                for device_id in admin_device_ids
+            ):
+                raise RuntimeError("admin_device_ids in AUTH_SECRET_FILE must be a list of device IDs")
+            return cls(
+                values["party_code"],
+                values["session_key"],
+                True,
+                tuple(test_codes),
+                tuple(admin_device_ids),
+            )
         if os.environ.get("FOTOVIBE_DEV") == "1":
             return cls(
                 os.environ.get("PARTY_CODE", "1234"),
                 "development-only-key",
                 False,
                 ("1234",),
+                DEFAULT_ADMIN_DEVICE_IDS,
             )
         raise RuntimeError("AUTH_SECRET_FILE is required outside explicit local development")
 
@@ -394,28 +463,164 @@ def create_app(settings=None, store=None, task_store=None):
             raise HTTPException(404, "Dieses Foto ist nicht verfügbar.") from None
         return value if isinstance(value, dict) else {}
 
-    def gallery_entries():
+    def interaction_prefix(photo_id=None):
+        return f"interactions/{photo_id}/" if photo_id else "interactions/"
+
+    def reaction_states(objects):
+        """Return the latest immutable on/off event for every device reaction."""
+        states = {}
+        for obj in objects:
+            metadata = obj.metadata or {}
+            photo_id = metadata.get("photo_id")
+            device = metadata.get("device")
+            reaction_id = metadata.get("reaction")
+            if (
+                metadata.get("kind") != "reaction"
+                or not isinstance(photo_id, str)
+                or not isinstance(device, str)
+                or reaction_id not in REACTIONS
+            ):
+                continue
+            try:
+                valid_id(photo_id)
+            except HTTPException:
+                continue
+            recorded_at = metadata.get("recorded_at")
+            recorded_at = recorded_at if isinstance(recorded_at, str) else obj.created
+            active = metadata.get("active") not in {False, "0", "false", "False"}
+            key = (photo_id, device, reaction_id)
+            if key not in states or recorded_at >= states[key][0]:
+                states[key] = (recorded_at, active)
+        return states
+
+    def interaction_summaries():
+        summaries = {}
+        objects = store.list_prefix(interaction_prefix())
+        for obj in objects:
+            metadata = obj.metadata or {}
+            photo_id = metadata.get("photo_id")
+            kind = metadata.get("kind")
+            if not isinstance(photo_id, str) or kind not in {"reaction", "comment"}:
+                continue
+            try:
+                valid_id(photo_id)
+            except HTTPException:
+                continue
+            summary = summaries.setdefault(photo_id, {"counts": {}, "comments_count": 0})
+            if kind == "comment":
+                summary["comments_count"] += 1
+        for (photo_id, _device, reaction_id), (_recorded_at, active) in reaction_states(objects).items():
+            if active:
+                summary = summaries.setdefault(photo_id, {"counts": {}, "comments_count": 0})
+                summary["counts"][reaction_id] = summary["counts"].get(reaction_id, 0) + 1
+        return summaries
+
+    def public_interactions(summary):
+        summary = summary or {"counts": {}, "comments_count": 0}
+        return {
+            "reactions": [
+                {"emoji": emoji, "count": summary["counts"].get(reaction_id, 0)}
+                for reaction_id, emoji in REACTIONS.items()
+                if summary["counts"].get(reaction_id, 0)
+            ],
+            "comments_count": summary["comments_count"],
+        }
+
+    def interaction_details(photo_id, device):
+        summary = {"counts": {}, "comments_count": 0}
+        mine = set()
+        comments = []
+        objects = store.list_prefix(interaction_prefix(photo_id))
+        for (event_photo_id, event_device, reaction_id), (_recorded_at, active) in reaction_states(
+            objects
+        ).items():
+            if event_photo_id != photo_id or not active:
+                continue
+            summary["counts"][reaction_id] = summary["counts"].get(reaction_id, 0) + 1
+            if event_device == device:
+                mine.add(REACTIONS[reaction_id])
+        for obj in objects:
+            metadata = obj.metadata or {}
+            kind = metadata.get("kind")
+            if kind != "comment":
+                continue
+            raw = store.read(obj.name)
+            try:
+                comment = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            author = author_from_record(comment)
+            text = comment.get("text") if isinstance(comment, dict) else None
+            created_at = comment.get("created_at") if isinstance(comment, dict) else None
+            if author and isinstance(text, str) and isinstance(created_at, str):
+                comments.append({"author": author, "text": text, "created_at": created_at})
+                summary["comments_count"] += 1
+        comments.sort(key=lambda comment: comment["created_at"])
+        return {**public_interactions(summary), "mine": sorted(mine), "comments": comments}
+
+    def social_user(data):
+        user = user_for_device(data["device"])
+        if user is None:
+            raise HTTPException(409, "Bitte lege zuerst deinen Namen fest.")
+        return user
+
+    def normalized_comment(value):
+        if not isinstance(value, str):
+            raise HTTPException(400, "Bitte schreibe einen Kommentar.")
+        text = " ".join(value.split())
+        if not 1 <= len(text) <= COMMENT_MAX_LENGTH:
+            raise HTTPException(400, "Kommentare dürfen bis zu 500 Zeichen lang sein.")
+        return text
+
+    def hidden_photo_ids():
+        hidden = set()
+        for obj in store.list_prefix("hidden/"):
+            if obj.name.startswith("hidden/") and obj.name.endswith(".json"):
+                photo_id = Path(obj.name).stem
+                try:
+                    hidden.add(valid_id(photo_id))
+                except HTTPException:
+                    log.warning("invalid_hidden_photo_marker object=%s", obj.name)
+        return hidden
+
+    def gallery_entries(include_hidden=False):
         """Build the gallery index, including task metadata from the bucket."""
         entries = []
+        hidden_ids = hidden_photo_ids()
+        social = interaction_summaries()
         for obj in store.published():
             photo_id = Path(obj.name).stem
+            if photo_id in hidden_ids and not include_hidden:
+                continue
             indexed = indexed_metadata(obj)
             task = task_from_record(indexed or {})
             author = author_from_record(indexed or {})
+            record = None
+            width = obj.metadata.get("width")
+            height = obj.metadata.get("height")
+            try:
+                width, height = int(width), int(height)
+            except (TypeError, ValueError):
+                width = height = 0
             # Older objects have no compact index. Read their manifest only as a
-            # compatibility fallback; newly uploaded photos need no extra request.
-            if indexed is None:
+            # compatibility fallback. It also supplies the format of older photos.
+            if indexed is None or width < 1 or height < 1:
                 try:
                     record = manifest(photo_id)
                 except HTTPException:
                     log.warning("invalid_published_manifest object=%s", obj.name)
                     continue
-                task = task_from_record(record)
-                author = author_from_record(record)
-                if task is None:
-                    task = task_from_record(record.get("metadata", {}))
-                if author is None:
-                    author = author_from_record(record.get("metadata", {}))
+                if indexed is None:
+                    task = task_from_record(record)
+                    author = author_from_record(record)
+                    if task is None:
+                        task = task_from_record(record.get("metadata", {}))
+                    if author is None:
+                        author = author_from_record(record.get("metadata", {}))
+                width = record.get("width") if isinstance(record, dict) else 0
+                height = record.get("height") if isinstance(record, dict) else 0
+                width = width if isinstance(width, int) and width > 0 else 0
+                height = height if isinstance(height, int) and height > 0 else 0
             if task is None and indexed is None:
                 original = store.info(f"photos/{photo_id}/original")
                 if original:
@@ -423,10 +628,15 @@ def create_app(settings=None, store=None, task_store=None):
                     task = task_from_record(original_index or {}, original.metadata)
             metadata = indexed or ({"task": task} if task else {})
             entry = {"id": photo_id, "created_at": obj.created, "metadata": metadata}
+            if width and height:
+                entry.update(width=width, height=height)
             if task:
                 entry["task"] = task
             if author:
                 entry["author"] = author
+            if include_hidden:
+                entry["hidden"] = photo_id in hidden_ids
+            entry["interactions"] = public_interactions(social.get(photo_id))
             entries.append(entry)
         entries.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
         return entries
@@ -485,6 +695,58 @@ def create_app(settings=None, store=None, task_store=None):
             **user,
             "device_id": "d_" + device[:12],
             "values": {"photos_uploaded": photos_uploaded},
+            "is_admin": "d_" + device[:12] in settings.admin_device_ids,
+        }
+
+    def require_admin(request):
+        data = session_data(request)
+        if "d_" + data["device"][:12] not in settings.admin_device_ids:
+            raise HTTPException(403, "Dieser Bereich ist nur für Admins.")
+        return data
+
+    def admin_overview():
+        photos_by_author = {}
+        for photo in gallery_entries(include_hidden=True):
+            author = photo.get("author") or photo.get("metadata", {}).get("author")
+            if isinstance(author, dict) and isinstance(author.get("id"), str):
+                photos_by_author.setdefault(author["id"], []).append(
+                    {
+                        "id": photo["id"],
+                        "created_at": photo["created_at"],
+                        "hidden": photo["hidden"],
+                    }
+                )
+        users = []
+        for obj in store.list_prefix("users/"):
+            suffix = obj.name.removeprefix("users/")
+            if "/" in suffix or not suffix.endswith(".json"):
+                continue
+            device = suffix.removesuffix(".json")
+            if not re.fullmatch(r"[a-f0-9]{64}", device):
+                continue
+            profile = user_profile(device)
+            if profile is None:
+                continue
+            uploads = photos_by_author.get(profile["id"], [])
+            users.append(
+                {
+                    **profile,
+                    "joined_at": obj.created,
+                    "values": {
+                        **profile["values"],
+                        "photos_visible": sum(not photo["hidden"] for photo in uploads),
+                        "photos_hidden": sum(photo["hidden"] for photo in uploads),
+                    },
+                    "photos": uploads,
+                }
+            )
+        users.sort(key=lambda user: (user["name"].casefold(), user["id"]))
+        return {
+            "users": users,
+            "values": {
+                "users": len(users),
+                "photos": sum(len(user["photos"]) for user in users),
+            },
         }
 
     @app.exception_handler(GoogleAPIError)
@@ -538,6 +800,26 @@ def create_app(settings=None, store=None, task_store=None):
         if not choices:
             raise HTTPException(503, "Gerade ist keine Foto-Aufgabe verfügbar.")
         return secrets.choice(choices)
+
+    def task_text_from_request(payload):
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= 500:
+            raise HTTPException(400, "Eine Aufgabe muss zwischen 1 und 500 Zeichen lang sein.")
+        return text.strip()
+
+    @app.post("/api/tasks")
+    async def create_party_task(request: Request):
+        sid = session(request)
+        limiter.check("task-create:" + sid, 10)
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(400, "Bitte gib eine Aufgabe ein.") from None
+        try:
+            task = task_store.create(task_text_from_request(payload))
+        except ValueError:
+            raise HTTPException(400, "Die Aufgabe ist ungültig.") from None
+        return JSONResponse(task, status_code=201)
 
     @app.post("/api/session")
     async def login(request: Request):
@@ -621,6 +903,158 @@ def create_app(settings=None, store=None, task_store=None):
         )
         return response
 
+    @app.get("/api/admin/overview")
+    def admin_users(request: Request):
+        require_admin(request)
+        return admin_overview()
+
+    @app.get("/api/admin/tasks")
+    def admin_tasks(request: Request):
+        require_admin(request)
+        return {"tasks": sorted(task_store.all(), key=lambda task: (task["text"].casefold(), task["id"]))}
+
+    @app.post("/api/admin/tasks")
+    async def admin_create_task(request: Request):
+        require_admin(request)
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(400, "Bitte gib eine Aufgabe ein.") from None
+        try:
+            task = task_store.create(task_text_from_request(payload))
+        except ValueError:
+            raise HTTPException(400, "Die Aufgabe ist ungültig.") from None
+        return JSONResponse(task, status_code=201)
+
+    @app.patch("/api/admin/tasks/{task_id}")
+    async def admin_update_task(request: Request, task_id: str):
+        require_admin(request)
+        if not TASK_ID_PATTERN.fullmatch(task_id):
+            raise HTTPException(400, "Die Aufgaben-ID ist ungültig.")
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(400, "Bitte gib eine Aufgabe ein.") from None
+        existing = next((task for task in task_store.all() if task["id"] == task_id), None)
+        if existing is None:
+            raise HTTPException(404, "Diese Aufgabe gibt es nicht mehr.")
+        try:
+            return task_store.upsert(task_id, task_text_from_request(payload), existing["enabled"])
+        except ValueError:
+            raise HTTPException(400, "Die Aufgabe ist ungültig.") from None
+
+    @app.delete("/api/admin/tasks/{task_id}")
+    def admin_delete_task(request: Request, task_id: str):
+        require_admin(request)
+        if not TASK_ID_PATTERN.fullmatch(task_id):
+            raise HTTPException(400, "Die Aufgaben-ID ist ungültig.")
+        try:
+            deleted = task_store.delete(task_id)
+        except ValueError:
+            raise HTTPException(400, "Die Aufgaben-ID ist ungültig.") from None
+        if not deleted:
+            raise HTTPException(404, "Diese Aufgabe gibt es nicht mehr.")
+        return Response(status_code=204)
+
+    @app.post("/api/admin/photos/{photo_id}/hide")
+    def hide_photo(request: Request, photo_id: str):
+        data = require_admin(request)
+        valid_id(photo_id)
+        manifest(photo_id)
+        created = store.put(
+            f"hidden/{photo_id}.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "photo_id": photo_id,
+                    "hidden_at": datetime.now(UTC).isoformat(),
+                    "hidden_by": "d_" + data["device"][:12],
+                },
+                separators=(",", ":"),
+            ).encode(),
+            "application/json",
+        )
+        with cache_lock:
+            cache["until"] = 0
+        return {"id": photo_id, "hidden": True, "already_hidden": not created}
+
+    @app.get("/api/photos/{photo_id}/interactions")
+    def photo_interactions(request: Request, photo_id: str):
+        data = session_data(request)
+        valid_id(photo_id)
+        manifest(photo_id)
+        return interaction_details(photo_id, data["device"])
+
+    @app.post("/api/photos/{photo_id}/reactions")
+    async def react_to_photo(request: Request, photo_id: str):
+        data = session_data(request)
+        valid_id(photo_id)
+        manifest(photo_id)
+        limiter.check("reaction:" + data["sid"], 60)
+        try:
+            payload = await request.json()
+            emoji = payload.get("emoji")
+            reaction_id = next(key for key, value in REACTIONS.items() if value == emoji)
+            active = payload.get("active", True)
+            if not isinstance(active, bool):
+                raise TypeError
+        except (AttributeError, StopIteration, ValueError, TypeError):
+            raise HTTPException(400, "Diese Reaktion ist nicht verfügbar.") from None
+        social_user(data)
+        recorded_at = datetime.now(UTC).isoformat()
+        store.put(
+            f"{interaction_prefix(photo_id)}reactions/{data['device']}/{reaction_id}/{uuid.uuid4()}.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "emoji": emoji,
+                    "active": active,
+                    "created_at": recorded_at,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode(),
+            "application/json",
+            {
+                "kind": "reaction",
+                "photo_id": photo_id,
+                "reaction": reaction_id,
+                "device": data["device"],
+                "active": "1" if active else "0",
+                "recorded_at": recorded_at,
+            },
+        )
+        with cache_lock:
+            cache["until"] = 0
+        return interaction_details(photo_id, data["device"])
+
+    @app.post("/api/photos/{photo_id}/comments")
+    async def comment_on_photo(request: Request, photo_id: str):
+        data = session_data(request)
+        valid_id(photo_id)
+        manifest(photo_id)
+        limiter.check("comment:" + data["sid"], 20)
+        try:
+            payload = await request.json()
+            text = normalized_comment(payload.get("text"))
+        except (AttributeError, TypeError, ValueError):
+            raise HTTPException(400, "Bitte schreibe einen Kommentar.") from None
+        author = social_user(data)
+        created_at = datetime.now(UTC).isoformat()
+        store.put(
+            f"{interaction_prefix(photo_id)}comments/{uuid.uuid4()}.json",
+            json.dumps(
+                {"schema_version": 1, "author": author, "text": text, "created_at": created_at},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode(),
+            "application/json",
+            {"kind": "comment", "photo_id": photo_id},
+        )
+        with cache_lock:
+            cache["until"] = 0
+        return interaction_details(photo_id, data["device"])
+
     def persist(raw, photo_id, photo_metadata):
         digest = hashlib.sha256(raw).hexdigest()
         metadata_digest = hashlib.sha256(
@@ -694,6 +1128,8 @@ def create_app(settings=None, store=None, task_store=None):
                 {
                     "schema_version": "1",
                     "fotovibe_metadata": metadata_index(photo_metadata),
+                    "width": str(images["width"]),
+                    "height": str(images["height"]),
                 },
             )
             if not published_now:
@@ -740,8 +1176,10 @@ def create_app(settings=None, store=None, task_store=None):
         return JSONResponse(record, status_code=201 if created else 200)
 
     @app.get("/api/photos")
-    def photos(request: Request, cursor: str | None = None):
+    def photos(request: Request, cursor: str | None = None, q: str | None = None):
         session(request)
+        if q is not None and (not isinstance(q, str) or len(q) > 100):
+            raise HTTPException(400, "Die Suche ist zu lang.")
         after = None
         if cursor:
             try:
@@ -758,6 +1196,22 @@ def create_app(settings=None, store=None, task_store=None):
             if cache["until"] <= time.monotonic():
                 cache.update(photos=gallery_entries(), until=time.monotonic() + 5)
             entries = cache["photos"]
+        if q:
+            entries = [
+                photo
+                for photo in entries
+                if fuzzy_matches(
+                    q,
+                    " ".join(
+                        value
+                        for value in [
+                            (photo.get("author") or {}).get("name", ""),
+                            (photo.get("task") or {}).get("text", ""),
+                        ]
+                        if isinstance(value, str)
+                    ),
+                )
+            ]
         if after:
             entries = [x for x in entries if (x["created_at"], x["id"]) < tuple(after)]
         page = entries[:30]

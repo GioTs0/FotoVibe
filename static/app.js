@@ -13,11 +13,19 @@ let previewGeneration = 0;
 let uploading = false;
 let timer = null;
 let galleryBusy = false;
+let adminData = null;
+let adminTasks = null;
+let adminTab = 'users';
+let adminSearchTimer = null;
+let adminQuery = '';
 let nextCursor = null;
 let galleryLoaded = false;
 const photos = new Map();
 let detailButton = null;
 let scrollPosition = 0;
+let activeDetailPhoto = null;
+let galleryQuery = '';
+let gallerySearchTimer = null;
 let cameraStream = null;
 let cameraFacing = 'environment';
 let cameraGeneration = 0;
@@ -61,6 +69,8 @@ function showUser(user) {
   $('profile-device-id').textContent = currentUser.device_id || '–';
   const uploaded = currentUser.values?.photos_uploaded;
   $('profile-upload-count').textContent = Number.isInteger(uploaded) && uploaded >= 0 ? String(uploaded) : '–';
+  $('profile-admin-badge').hidden = !currentUser.is_admin;
+  $('admin-open').hidden = !currentUser.is_admin;
 }
 
 function showLogin(message = '') {
@@ -74,7 +84,7 @@ function showLogin(message = '') {
   closeProfileMenu();
   clearTimeout(timer);
   $('login').hidden = false;
-  $('profile-setup').hidden = $('upload').hidden = $('gallery').hidden = $('play').hidden = $('logout').hidden = $('boot').hidden = true;
+  $('profile-setup').hidden = $('upload').hidden = $('gallery').hidden = $('play').hidden = $('admin').hidden = $('logout').hidden = $('boot').hidden = true;
   $('login-error').textContent = message;
   $('party-code').focus();
 }
@@ -103,6 +113,7 @@ async function enter(user) {
     return false;
   }
   $('logout').hidden = false;
+  $('admin').hidden = true;
   $('party-code').value = '';
   $(galleryPage ? 'gallery' : playPage ? 'play' : 'upload').hidden = false;
   if (!galleryPage && !playPage && selected) showReviewShell();
@@ -156,6 +167,291 @@ $('profile-form').addEventListener('submit', async (event) => {
     $(galleryPage ? 'refresh' : playPage ? 'play-toggle' : 'camera').focus();
   } catch (error) { $('profile-error').textContent = error.message; }
   finally { $('profile-submit').disabled = false; $('profile-submit').innerHTML = 'Weiter zur Party <span aria-hidden="true">→</span>'; }
+});
+
+function closeTaskAdd() {
+  $('task-add-form').hidden = true;
+  $('task-add-open').hidden = false;
+  $('task-add-error').textContent = '';
+}
+
+$('task-add-open').addEventListener('click', () => {
+  $('task-add-open').hidden = true;
+  $('task-add-form').hidden = false;
+  $('task-add-status').textContent = '';
+  $('task-add-input').focus();
+});
+$('task-add-cancel').addEventListener('click', closeTaskAdd);
+$('task-add-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  $('task-add-error').textContent = '';
+  $('task-add-status').textContent = '';
+  $('task-add-submit').disabled = true;
+  try {
+    await api('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: $('task-add-input').value }) });
+    $('task-add-input').value = '';
+    $('task-add-status').textContent = 'Die Aufgabe ist ab jetzt in der Auswahl.';
+  } catch (error) { $('task-add-error').textContent = error.message; }
+  finally { $('task-add-submit').disabled = false; }
+});
+
+function adminReturnPage() {
+  return galleryPage ? 'gallery' : playPage ? 'play' : 'upload';
+}
+
+function adminMetric(label, value) {
+  const item = document.createElement('div');
+  const term = document.createElement('dt');
+  const description = document.createElement('dd');
+  term.textContent = label;
+  description.textContent = String(value);
+  item.append(term, description);
+  return item;
+}
+
+async function hidePhotoFromGallery(photoId, button, messageTarget) {
+  if (!currentUser?.is_admin) return;
+  if (!window.confirm('Dieses Foto wird nur aus der Galerie ausgeblendet. Die Dateien bleiben im Cloud Bucket erhalten.')) return;
+  button.disabled = true;
+  try {
+    await api(`/api/admin/photos/${photoId}/hide`, { method: 'POST' });
+    photos.delete(photoId);
+    document.querySelectorAll(`.photo-tile[data-photo-id="${photoId}"]`).forEach((tile) => tile.remove());
+    messageTarget.textContent = 'Das Foto ist nicht mehr in der Galerie sichtbar.';
+    $('detail-hide').hidden = true;
+    if (!$('admin').hidden) await loadAdmin();
+  } catch (error) {
+    messageTarget.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+function normalizeAdminSearch(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('de');
+}
+
+function searchableAdminText(user) {
+  const value = [user.name, user.id, user.device_id, ...(user.photos || []).map((photo) => photo.id)]
+    .filter(Boolean)
+    .join(' ');
+  return normalizeAdminSearch(value);
+}
+
+function renderAdminUsers(result) {
+  const users = $('admin-users');
+  const summary = $('admin-summary');
+  const query = normalizeAdminSearch(adminQuery);
+  const visibleUsers = (result.users || []).filter((user) => searchableAdminText(user).includes(query));
+  users.replaceChildren();
+  summary.replaceChildren();
+  summary.append(
+    adminMetric('Gäste', visibleUsers.length),
+    adminMetric('Fotos', visibleUsers.reduce((total, user) => total + (user.photos?.length || 0), 0)),
+  );
+  summary.hidden = false;
+  $('admin-empty').hidden = visibleUsers.length > 0;
+
+  for (const user of visibleUsers) {
+    const group = document.createElement('details');
+    group.className = 'admin-user';
+    const summaryRow = document.createElement('summary');
+    summaryRow.className = 'admin-user-summary';
+    const identity = document.createElement('div');
+    identity.className = 'admin-user-identity';
+    const heading = document.createElement('div');
+    heading.className = 'admin-user-heading';
+    const name = document.createElement('h2');
+    name.textContent = user.name;
+    heading.append(name);
+    if (user.is_admin) {
+      const badge = document.createElement('span');
+      badge.className = 'admin-badge';
+      badge.textContent = 'Admin';
+      heading.append(badge);
+    }
+    const identifiers = document.createElement('p');
+    identifiers.className = 'admin-identifiers';
+    identifiers.textContent = `${user.id} · ${user.device_id}`;
+    identity.append(heading, identifiers);
+    const metrics = document.createElement('dl');
+    metrics.className = 'admin-user-metrics';
+    metrics.append(
+      adminMetric('Fotos', user.values?.photos_uploaded || 0),
+      adminMetric('Sichtbar', user.values?.photos_visible || 0),
+      adminMetric('Ausgeblendet', user.values?.photos_hidden || 0),
+    );
+    const disclosure = document.createElement('span');
+    disclosure.className = 'admin-disclosure';
+    disclosure.textContent = `${user.photos?.length || 0} ansehen`;
+    summaryRow.append(identity, metrics, disclosure);
+    group.append(summaryRow);
+
+    const content = document.createElement('div');
+    content.className = 'admin-user-photos';
+    if (!user.photos?.length) {
+      const empty = document.createElement('p');
+      empty.className = 'admin-user-no-photos';
+      empty.textContent = 'Noch keine Fotos hochgeladen.';
+      content.append(empty);
+    } else {
+      const previews = document.createElement('div');
+      previews.className = 'admin-photo-previews';
+      for (const photo of user.photos) {
+        const item = document.createElement('div');
+        item.className = 'admin-photo-preview';
+        const image = document.createElement('img');
+        image.src = `/api/photos/${photo.id}/thumb`;
+        image.alt = `Vorschau von ${user.name}`;
+        image.loading = 'lazy';
+        item.append(image);
+        if (photo.hidden) {
+          const hidden = document.createElement('span');
+          hidden.textContent = 'Ausgeblendet';
+          item.append(hidden);
+        } else {
+          const hide = document.createElement('button');
+          hide.type = 'button';
+          hide.className = 'secondary admin-preview-hide';
+          hide.textContent = 'Entfernen';
+          hide.setAttribute('aria-label', `Foto von ${user.name} aus der Galerie entfernen`);
+          hide.addEventListener('click', () => hidePhotoFromGallery(photo.id, hide, $('admin-error')));
+          item.append(hide);
+        }
+        previews.append(item);
+      }
+      content.append(previews);
+    }
+    group.append(content);
+    users.append(group);
+  }
+}
+
+function renderAdminTasks(tasks) {
+  const container = $('admin-tasks');
+  container.replaceChildren();
+  $('admin-tasks-empty').hidden = tasks.length > 0;
+  for (const task of tasks) {
+    const item = document.createElement('article');
+    item.className = 'admin-task';
+    const text = document.createElement('textarea');
+    text.value = task.text;
+    text.maxLength = 500;
+    text.rows = 3;
+    text.setAttribute('aria-label', 'Foto-Aufgabe bearbeiten');
+    const meta = document.createElement('code');
+    meta.textContent = task.id;
+    const actions = document.createElement('div');
+    actions.className = 'admin-task-actions';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'secondary';
+    save.textContent = 'Speichern';
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      $('admin-error').textContent = '';
+      try {
+        await api(`/api/admin/tasks/${task.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text.value }) });
+        await loadAdminTasks();
+      } catch (error) { $('admin-error').textContent = error.message; save.disabled = false; }
+    });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'text-button';
+    remove.textContent = 'Löschen';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm('Diese Aufgabe wird aus der Auswahl entfernt. Bereits gemachte Fotos behalten ihre gespeicherte Aufgabe.')) return;
+      remove.disabled = true;
+      $('admin-error').textContent = '';
+      try {
+        await api(`/api/admin/tasks/${task.id}`, { method: 'DELETE' });
+        await loadAdminTasks();
+      } catch (error) { $('admin-error').textContent = error.message; remove.disabled = false; }
+    });
+    actions.append(save, remove);
+    item.append(text, meta, actions);
+    container.append(item);
+  }
+}
+
+async function loadAdminTasks() {
+  if (!currentUser?.is_admin) return;
+  $('admin-error').textContent = '';
+  $('admin-tasks-status').textContent = 'Aufgaben werden geladen …';
+  try {
+    const result = await api('/api/admin/tasks');
+    adminTasks = result.tasks || [];
+    renderAdminTasks(adminTasks);
+    $('admin-tasks-status').textContent = `${adminTasks.length} ${adminTasks.length === 1 ? 'Aufgabe' : 'Aufgaben'} verfügbar`;
+  } catch (error) {
+    $('admin-error').textContent = error.message;
+    $('admin-tasks-status').textContent = 'Die Aufgaben konnten nicht geladen werden.';
+  }
+}
+
+async function setAdminTab(tab) {
+  adminTab = tab;
+  const tasks = tab === 'tasks';
+  $('admin-users-tab').setAttribute('aria-selected', String(!tasks));
+  $('admin-tasks-tab').setAttribute('aria-selected', String(tasks));
+  $('admin-users-pane').hidden = tasks;
+  $('admin-tasks-pane').hidden = !tasks;
+  if (tasks) await loadAdminTasks();
+}
+
+async function loadAdmin() {
+  if (!currentUser?.is_admin) return;
+  $('admin-error').textContent = '';
+  $('admin-status').textContent = 'Daten werden geladen …';
+  try {
+    const result = await api('/api/admin/overview');
+    adminData = result;
+    renderAdminUsers(result);
+    $('admin-status').textContent = `${result.values?.users || 0} ${result.values?.users === 1 ? 'Person' : 'Personen'} · ${result.values?.photos || 0} Fotos`;
+  } catch (error) {
+    $('admin-error').textContent = error.message;
+    $('admin-status').textContent = 'Die Verwaltung konnte nicht geladen werden.';
+  }
+}
+
+$('admin-search').addEventListener('input', () => {
+  clearTimeout(adminSearchTimer);
+  adminSearchTimer = setTimeout(() => {
+    adminQuery = $('admin-search').value.trim();
+    if (adminData) renderAdminUsers(adminData);
+  }, 180);
+});
+
+$('admin-users-tab').addEventListener('click', () => setAdminTab('users'));
+$('admin-tasks-tab').addEventListener('click', () => setAdminTab('tasks'));
+$('admin-task-create-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  $('admin-error').textContent = '';
+  $('admin-task-create-submit').disabled = true;
+  try {
+    await api('/api/admin/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: $('admin-task-create-input').value }) });
+    $('admin-task-create-input').value = '';
+    await loadAdminTasks();
+  } catch (error) { $('admin-error').textContent = error.message; }
+  finally { $('admin-task-create-submit').disabled = false; }
+});
+
+$('admin-open').addEventListener('click', async () => {
+  closeProfileMenu();
+  $('upload').hidden = $('gallery').hidden = $('play').hidden = true;
+  $('admin').hidden = false;
+  await setAdminTab(adminTab);
+  if (adminTab === 'users') await loadAdmin();
+  $(adminTab === 'tasks' ? 'admin-tasks-tab' : 'admin-back').focus();
+});
+$('admin-back').addEventListener('click', async () => {
+  $('admin').hidden = true;
+  $(adminReturnPage()).hidden = false;
+  if (galleryPage) await loadGallery(false);
+  if (playPage) await loadPlay();
+  $('profile-button').focus();
 });
 
 $('camera').addEventListener('click', () => { clearChallenge(false); openCamera(cameraFacing); });
@@ -383,7 +679,13 @@ async function captureCameraPhoto() {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
-  canvas.getContext('2d').drawImage(video, 0, 0, width, height);
+  const context = canvas.getContext('2d');
+  if (cameraFacing === 'user') {
+    // Match the iPhone Camera default: saved front-camera photos are not mirrored.
+    context.translate(width, 0);
+    context.scale(-1, 1);
+  }
+  context.drawImage(video, 0, 0, width, height);
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.94));
   if (!blob) {
     $('camera-status').textContent = 'Das Foto konnte nicht erstellt werden. Bitte erneut versuchen.';
@@ -568,10 +870,154 @@ window.addEventListener('beforeunload', (event) => {
 });
 window.addEventListener('pagehide', () => stopCamera(false));
 
+const REACTION_EMOJIS = ['❤️', '😂', '😍', '👏', '🔥'];
+const pendingReactions = new Set();
+
+function reactionSummaryText(interactions) {
+  const reactions = Array.isArray(interactions?.reactions) ? interactions.reactions : [];
+  const reactionText = reactions
+    .filter((reaction) => reaction?.emoji && Number(reaction.count) > 0)
+    .map((reaction) => `${reaction.emoji} ${reaction.count}`)
+    .join(' ');
+  const comments = Number(interactions?.comments_count) || 0;
+  return [reactionText, comments ? `💬 ${comments}` : ''].filter(Boolean).join(' · ');
+}
+
+function renderTileInteractions(tile, interactions) {
+  const text = reactionSummaryText(interactions);
+  const current = tile.querySelector('.photo-interaction-summary');
+  if (!text) {
+    current?.remove();
+    return;
+  }
+  const summary = current || document.createElement('span');
+  summary.className = 'photo-interaction-summary';
+  summary.textContent = text;
+  if (!current) {
+    const meta = tile.querySelector('.photo-tile-meta');
+    (meta || tile).append(summary);
+  }
+}
+
+function updatePhotoInteractions(photoId, interactions) {
+  const photo = photos.get(photoId);
+  if (photo) {
+    photo.interactions = {
+      reactions: interactions.reactions || [],
+      comments_count: interactions.comments_count || 0,
+    };
+  }
+  document.querySelectorAll(`.photo-tile[data-photo-id="${photoId}"]`).forEach((tile) => {
+    renderTileInteractions(tile, interactions);
+  });
+}
+
+function commentDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? '' : date.toLocaleString('de', {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function renderDetailInteractions(interactions) {
+  const mine = new Set(interactions.mine || []);
+  const options = $('detail-reaction-options');
+  const counts = $('detail-reaction-counts');
+  const comments = $('detail-comments');
+  options.replaceChildren();
+  for (const emoji of REACTION_EMOJIS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'reaction-button';
+    button.textContent = emoji;
+    button.title = `Mit ${emoji} reagieren`;
+    button.setAttribute('aria-label', mine.has(emoji) ? `Reaktion ${emoji} entfernen` : `Mit ${emoji} reagieren`);
+    button.setAttribute('aria-pressed', String(mine.has(emoji)));
+    if (mine.has(emoji)) button.title = `Du hast mit ${emoji} reagiert`;
+    button.addEventListener('click', async () => {
+      if (!activeDetailPhoto) return;
+      const photoId = activeDetailPhoto.id;
+      const reactionKey = `${photoId}:${emoji}`;
+      if (pendingReactions.has(reactionKey)) return;
+      const active = !mine.has(emoji);
+      pendingReactions.add(reactionKey);
+      button.setAttribute('aria-pressed', String(active));
+      button.title = active ? `Du hast mit ${emoji} reagiert` : `Mit ${emoji} reagieren`;
+      button.setAttribute('aria-label', active ? `Reaktion ${emoji} entfernen` : `Mit ${emoji} reagieren`);
+      try {
+        const result = await api(`/api/photos/${photoId}/reactions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ emoji, active }),
+        });
+        if (activeDetailPhoto?.id === photoId) {
+          updatePhotoInteractions(photoId, result);
+          renderDetailInteractions(result);
+        }
+      } catch (error) {
+        $('detail-comment-error').textContent = error.message;
+        button.setAttribute('aria-pressed', String(!active));
+        button.title = !active ? `Du hast mit ${emoji} reagiert` : `Mit ${emoji} reagieren`;
+        button.setAttribute('aria-label', !active ? `Reaktion ${emoji} entfernen` : `Mit ${emoji} reagieren`);
+      } finally {
+        pendingReactions.delete(reactionKey);
+      }
+    });
+    options.append(button);
+  }
+  const reactionText = reactionSummaryText(interactions);
+  counts.textContent = reactionText || 'Noch keine Reaktionen.';
+  comments.replaceChildren();
+  const entries = Array.isArray(interactions.comments) ? interactions.comments : [];
+  if (!entries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'comment-empty';
+    empty.textContent = 'Noch keine Kommentare.';
+    comments.append(empty);
+    return;
+  }
+  for (const comment of entries) {
+    const item = document.createElement('article');
+    item.className = 'comment';
+    const metadata = document.createElement('p');
+    metadata.className = 'comment-meta';
+    metadata.textContent = `${comment.author?.name || 'Gast'}${commentDate(comment.created_at) ? ` · ${commentDate(comment.created_at)}` : ''}`;
+    const text = document.createElement('p');
+    text.textContent = comment.text || '';
+    item.append(metadata, text);
+    comments.append(item);
+  }
+}
+
+async function loadDetailInteractions(photoId) {
+  $('detail-reaction-counts').textContent = 'Reaktionen werden geladen …';
+  $('detail-comments').replaceChildren();
+  try {
+    const interactions = await api(`/api/photos/${photoId}/interactions`);
+    if (activeDetailPhoto?.id !== photoId) return;
+    updatePhotoInteractions(photoId, interactions);
+    renderDetailInteractions(interactions);
+  } catch (error) {
+    if (activeDetailPhoto?.id === photoId) {
+      $('detail-reaction-counts').textContent = 'Reaktionen konnten nicht geladen werden.';
+      $('detail-comment-error').textContent = error.message;
+    }
+  }
+}
+
 function photoButton(photo) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'photo-tile';
+  button.dataset.photoId = photo.id;
+  const width = Number(photo.width);
+  const height = Number(photo.height);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    button.style.setProperty('--gallery-photo-ratio', `${width} / ${height}`);
+    button.classList.add(width > height ? 'is-landscape' : width < height ? 'is-portrait' : 'is-square');
+  } else {
+    button.classList.add('is-portrait');
+  }
   const date = new Date(photo.created_at).toLocaleString('de', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const task = photo.task || photo.metadata?.task;
   const author = photo.author || photo.metadata?.author;
@@ -582,20 +1028,25 @@ function photoButton(photo) {
   image.alt = `Partyfoto vom ${date}`;
   image.loading = 'lazy';
   image.decoding = 'async';
-  button.append(image);
-  if (author?.name) {
-    const credit = document.createElement('span');
-    credit.className = 'photo-author-label';
-    credit.textContent = author.name;
-    button.append(credit);
-  }
   if (task?.text) {
     const label = document.createElement('span');
     label.className = 'photo-task-label';
     label.textContent = task.text;
     button.append(label);
   }
+  button.append(image);
+  const meta = document.createElement('div');
+  meta.className = 'photo-tile-meta';
+  if (author?.name) {
+    const credit = document.createElement('span');
+    credit.className = 'photo-author-label';
+    credit.textContent = author.name;
+    meta.append(credit);
+  }
+  button.append(meta);
+  renderTileInteractions(button, photo.interactions);
   button.addEventListener('click', () => {
+    activeDetailPhoto = photo;
     detailButton = button;
     scrollPosition = window.scrollY;
     $('gallery-overview').hidden = true;
@@ -610,6 +1061,11 @@ function photoButton(photo) {
     $('detail-task').hidden = !task?.text;
     $('detail-task-text').textContent = task?.text || '';
     $('download').href = `/api/photos/${photo.id}/original`;
+    $('detail-hide').hidden = !currentUser?.is_admin;
+    $('detail-hide').onclick = () => hidePhotoFromGallery(photo.id, $('detail-hide'), $('detail-status'));
+    $('detail-comment-input').value = '';
+    $('detail-comment-error').textContent = '';
+    void loadDetailInteractions(photo.id);
     window.scrollTo(0, 0);
     $('back-to-grid').focus();
   });
@@ -712,8 +1168,35 @@ $('play-next').addEventListener('click', loadPlay);
 $('back-to-grid').addEventListener('click', () => {
   $('photo-detail').hidden = true;
   $('gallery-overview').hidden = false;
+  activeDetailPhoto = null;
+  $('detail-comment-error').textContent = '';
   window.scrollTo(0, scrollPosition);
   detailButton?.focus({ preventScroll: true });
+});
+
+$('detail-comment-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!activeDetailPhoto) return;
+  const photoId = activeDetailPhoto.id;
+  const submit = $('detail-comment-submit');
+  $('detail-comment-error').textContent = '';
+  submit.disabled = true;
+  try {
+    const result = await api(`/api/photos/${photoId}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: $('detail-comment-input').value }),
+    });
+    if (activeDetailPhoto?.id === photoId && !$('photo-detail').hidden) {
+      updatePhotoInteractions(photoId, result);
+      renderDetailInteractions(result);
+      $('detail-comment-input').value = '';
+    }
+  } catch (error) {
+    $('detail-comment-error').textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
 });
 
 function scheduleRefresh() {
@@ -723,18 +1206,26 @@ function scheduleRefresh() {
 
 async function loadGallery(more) {
   if (galleryBusy || !authenticated) return;
+  const requestedQuery = galleryQuery;
   galleryBusy = true;
   $('refresh').disabled = $('load-more').disabled = true;
   $('gallery-error').textContent = '';
   try {
-    const query = more && nextCursor ? `?cursor=${encodeURIComponent(nextCursor)}` : '';
+    const parameters = new URLSearchParams();
+    if (more && nextCursor) parameters.set('cursor', nextCursor);
+    if (requestedQuery) parameters.set('q', requestedQuery);
+    const query = parameters.size ? `?${parameters}` : '';
     let result = await api('/api/photos' + query);
+    if (requestedQuery !== galleryQuery) return;
     let batch = [...result.photos];
     if (more || !galleryLoaded) nextCursor = result.next_cursor;
     // Catch up even if over 30 photos arrive between polls, without resetting older pages.
     if (!more && galleryLoaded && photos.size) {
       while (result.next_cursor && !result.photos.some((photo) => photos.has(photo.id))) {
-        result = await api('/api/photos?cursor=' + encodeURIComponent(result.next_cursor));
+        const catchup = new URLSearchParams({ cursor: result.next_cursor });
+        if (requestedQuery) catchup.set('q', requestedQuery);
+        result = await api('/api/photos?' + catchup);
+        if (requestedQuery !== galleryQuery) return;
         batch.push(...result.photos);
       }
     } else if (!more && galleryLoaded && !photos.size) nextCursor = result.next_cursor;
@@ -749,14 +1240,40 @@ async function loadGallery(more) {
     if (more) $('photo-grid').append(fragment); else $('photo-grid').prepend(fragment);
     galleryLoaded = true;
     $('gallery-empty').hidden = photos.size > 0;
+    if (!photos.size && requestedQuery) {
+      $('gallery-empty').querySelector('h2').textContent = 'Keine passenden Fotos gefunden.';
+      $('gallery-empty').querySelector('p').textContent = `Für „${requestedQuery}“ gibt es noch keinen Treffer.`;
+    } else {
+      $('gallery-empty').querySelector('h2').textContent = 'Der erste Moment fehlt noch.';
+      $('gallery-empty').querySelector('p').textContent = 'Mach den Anfang und teile ein Foto von der Party.';
+    }
     $('load-more').hidden = !nextCursor;
     $('gallery-status').textContent = photos.size ? `${photos.size} ${photos.size === 1 ? 'Foto' : 'Fotos'} geladen${added && !more ? ' · Gerade aktualisiert' : ''}. Neue Fotos erscheinen automatisch.` : 'Neue Fotos erscheinen hier automatisch.';
   } catch (error) { $('gallery-error').textContent = error.message; $('gallery-status').textContent = 'Die Galerie konnte nicht aktualisiert werden.'; }
-  finally { galleryBusy = false; $('refresh').disabled = $('load-more').disabled = false; scheduleRefresh(); }
+  finally {
+    galleryBusy = false;
+    $('refresh').disabled = $('load-more').disabled = false;
+    if (requestedQuery !== galleryQuery) void loadGallery(false);
+    else scheduleRefresh();
+  }
 }
 
 $('refresh').addEventListener('click', () => loadGallery(false));
 $('load-more').addEventListener('click', () => loadGallery(true));
+$('gallery-search').addEventListener('input', () => {
+  clearTimeout(gallerySearchTimer);
+  gallerySearchTimer = setTimeout(() => {
+    const query = $('gallery-search').value.trim();
+    if (query === galleryQuery) return;
+    galleryQuery = query;
+    nextCursor = null;
+    galleryLoaded = false;
+    photos.clear();
+    $('photo-grid').replaceChildren();
+    $('load-more').hidden = true;
+    void loadGallery(false);
+  }, 180);
+});
 document.addEventListener('visibilitychange', () => {
   clearTimeout(timer);
   clearTimeout(playTimer);
