@@ -1,0 +1,4 @@
+[
+  {"name":"delete-old","action":{"type":"Delete"},"condition":{"tagState":"any","olderThan":"7d"}},
+  {"name":"keep-three","action":{"type":"Keep"},"mostRecentVersions":{"keepCount":3}}
+]

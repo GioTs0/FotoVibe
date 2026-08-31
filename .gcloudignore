@@ -1,0 +1,14 @@
+.gcloudignore
+.git
+.venv
+.local
+.pytest_cache
+.ruff_cache
+__pycache__
+node_modules
+static/vendor
+artifacts
+tests
+.env
+.DS_Store
+

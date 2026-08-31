@@ -1,0 +1,10 @@
+.git
+.venv
+.local
+node_modules
+static/vendor
+artifacts
+tests
+__pycache__
+.env
+

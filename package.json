@@ -1,0 +1,6 @@
+{
+  "name": "fotovibe-assets",
+  "private": true,
+  "scripts": {"build": "node scripts/vendor.mjs"},
+  "dependencies": {"heic-to": "1.5.2"}
+}
