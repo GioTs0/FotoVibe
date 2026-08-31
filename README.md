@@ -1,7 +1,8 @@
 # FotoVibe
 
 Private Party-Fotogalerie für etwa 100 Gäste. Deutschsprachige Oberfläche,
-gemeinsamer Party-Code, native Handykamera und explizite Upload-Bestätigung.
+gemeinsamer Party-Code, zufällige Foto-Aufgaben, native Handykamera und explizite
+Upload-Bestätigung.
 
 ## Infrastruktur
 
@@ -9,9 +10,12 @@ gemeinsamer Party-Code, native Handykamera und explizite Upload-Bestätigung.
 - Cloud Run: `europe-west1` (Belgien), `fotovibe`, 1 vCPU / 1 GiB,
   0–2 Instanzen, Concurrency 4
 - Foto-Bucket: `gs://fotovibe-520703150508-photos`
+- Aufgaben: Firestore Native, benannte Datenbank `fotovibe` in Frankfurt;
+  Dokumente unter `tasks/<schlüssel>` mit `text` und `enabled`
 - Secret: `fotovibe-auth` (Code und Sitzungsschlüssel; Replikation Frankfurt)
 - Laufzeitidentität: `fotovibe-runtime`, Objekt-Erstellung/-Lesen nur im Foto-Bucket
-  und Zugriff nur auf das Auth-Secret. Keine Löschrechte, keine Schlüsseldateien.
+  sowie lesender Firestore-Zugriff und Zugriff auf das Auth-Secret. Keine
+  Löschrechte, keine Schlüsseldateien.
 - Build-Identität: `fotovibe-build`, dokumentierte Rolle `roles/run.builder`.
 - Cloud Build und Artifact Registry werden nur für Builds/Image-Ablage benötigt.
   Quellarchive ab sieben Tagen werden entfernt; in Artifact Registry bleiben
@@ -34,8 +38,9 @@ npm run build
 make run
 ```
 
-Öffne `http://127.0.0.1:8080`. Der **ausschließlich lokale** Test-Code ist
-`1234` (auch mit Leerzeichen als `1 2 3 4` akzeptiert). Lokale Fotos liegen unter `.local/photos`. Der Entwicklungsmodus
+Öffne `http://127.0.0.1:8080`. Der Test-Code ist `1234` (auch mit Leerzeichen
+als `1 2 3 4` akzeptiert) und funktioniert ebenfalls in der bereitgestellten
+Website. Lokale Fotos liegen unter `.local/photos`. Der Entwicklungsmodus
 verwendet keine GCP-Ressourcen und ungesicherte lokale Cookies; niemals öffentlich
 bereitstellen. Der produktive Container startet ohne Auth-Secret nicht.
 
@@ -54,8 +59,9 @@ lädt sich automatisch neu. Der direkte Aufruf bleibt ebenfalls möglich:
 make deploy
 ```
 
-Das Skript aktiviert die APIs, erstellt fehlende Ressourcen und deployt aus dem
-Quellcode. Anschließend richtet es die Cloud-Run-Mappings und Cloud-DNS-Einträge
+Das Skript aktiviert die APIs, erstellt fehlende Ressourcen, legt die benannte
+Firestore-Datenbank an und ergänzt darin fehlende Beispielaufgaben. Anschließend
+deployt es den Quellcode und richtet die Cloud-Run-Mappings und Cloud-DNS-Einträge
 für `180-foto.com` und `www.180-foto.com` ein. Beim ersten Lauf kann die Ausstellung
 der Google-verwalteten HTTPS-Zertifikate nach dem Deployment noch einige Zeit dauern.
 Bestehende Fotos und der Party-Code bleiben erhalten. Alle
@@ -75,14 +81,55 @@ gcloud run services describe fotovibe \
 ```
 
 Upload: `https://180-foto.com`, Galerie: `https://180-foto.com/gallery`.
+Das gemeinsame Fotobuch ist unter `https://180-foto.com/play` erreichbar. Dort
+werden vier Bilder als wechselnde Doppelseiten gezeigt; mit
+`?autoplay=1` startet der Wechsel automatisch. Neuere Uploads erhalten einen
+deutlichen Gewichtungsvorsprung, ältere Fotos bleiben weiterhin im Pool. Eine
+Seite vermeidet kurze Wiederholungen, damit eine kleine Party-Galerie trotzdem
+lebendig bleibt.
+Der feste Test-Code `1234` greift dort auf dieselbe private Fotoablage und Galerie
+wie der reguläre Party-Code zu. Er ist leicht zu erraten und sollte nach Abschluss
+der Tests wieder aus dem Auth-Secret entfernt werden.
 Für die Kamera auf dem Handy die HTTPS-Adresse in Safari bzw. Chrome öffnen,
 möglichst nicht im integrierten Browser einer Messenger-App.
 
 „Foto aufnehmen“ fordert über die Browser-Kamera-API Zugriff auf eine Kamera an
-und zeigt eine Live-Vorschau mit Auslöser. Das funktioniert auch in Desktop-
-Browsern mit Webcam. Falls ein Browser die API nicht unterstützt oder der Zugriff
-nicht möglich ist, bietet die Oberfläche zusätzlich den nativen Kamera-/Datei-
-Dialog an. Kamerazugriff funktioniert außerhalb von `localhost` nur über HTTPS.
+und zeigt Livebild und lokale Fotovorschau als bildschirmfüllenden Ablauf. Im
+Livebild stehen Schließen, Wechsel zwischen Front- und Rückkamera sowie der
+Auslöser direkt über dem Kamerabild. Nach einer Aufnahme führt Zurück unmittelbar
+wieder in die Kamera; erst „Foto hochladen“ überträgt Bilddaten. Eine gezogene
+Aufgabe erscheint als kompakte verschiebbare Einblendung. Sie kann aus dem Bild
+geschoben oder über „Aufgabe zeigen“ wiederhergestellt werden. Das funktioniert
+auch in Desktop-Browsern mit Webcam. Falls ein Browser die API nicht unterstützt
+oder der Zugriff nicht möglich ist, bietet die Oberfläche zusätzlich den nativen
+Kamera-/Dateidialog an. Kamerazugriff funktioniert außerhalb von `localhost` nur
+über HTTPS.
+
+## Foto-Aufgaben verwalten
+
+Die zehn Ausgangsaufgaben stehen in `infra/tasks.json`. Beim Deployment werden
+nur fehlende Dokumente angelegt; bereits in Firestore geänderte Texte bleiben
+erhalten. Die Website liefert Aufgaben ausschließlich nach erfolgreicher Anmeldung
+und berücksichtigt nur Dokumente mit `enabled=true`.
+
+Mit der vorhandenen gcloud-Anmeldung lassen sich Aufgaben ohne neues Deployment
+verwalten:
+
+```sh
+python3 scripts/manage_tasks.py list
+python3 scripts/manage_tasks.py set gruppenfoto "Mach ein Foto mit vier Personen, die sich heute neu kennengelernt haben."
+python3 scripts/manage_tasks.py disable gruppenfoto
+```
+
+`set` erstellt einen neuen Schlüssel oder überschreibt Text und Status eines
+bestehenden Dokuments. `disable` behält den Eintrag, zeigt ihn Gästen aber nicht
+mehr an. Schlüssel bestehen aus Kleinbuchstaben, Ziffern und Bindestrichen; Texte
+sind auf 500 Zeichen begrenzt.
+
+Wird ein Foto über eine Aufgabe aufgenommen, sendet der Browser nur den
+Aufgabenschlüssel. Das Backend löst ihn gegen die aktive Firestore-Aufgabe auf und
+speichert Schlüssel und aktuellen Text als Momentaufnahme im Foto-Datensatz. Eine
+spätere Änderung oder Deaktivierung der Aufgabe verändert ältere Fotos daher nicht.
 
 ## Party-Code anzeigen oder wechseln
 
@@ -118,14 +165,20 @@ Eine private lokale Kopie neu erzeugter Secrets liegt in `.local/auth.json`
 - Originale werden nicht verändert. Anzeigeversion (max. 2560 px) und Thumbnail
   (max. 640 px) sind JPEGs mit korrigierter Orientierung und ohne EXIF/GPS.
 - Originale können EXIF/GPS enthalten und sind für alle mit Party-Code downloadbar.
-- Kein Upload vor Bestätigung. HEIC-Vorschauen werden lokal im Browser berechnet;
-  der mitgelieferte Decoder wird nur bei Bedarf nachgeladen, ohne externes CDN.
-- Keine automatische Fotolöschung, kein Versionsarchiv. Nach manueller Löschung
-  bewahrt GCS die Daten durch Soft Delete noch sieben Tage auf.
-- Keine Analyse-/Tracking-Software. GCP führt betriebliche Request-/Fehlerlogs;
-  die Anwendung protokolliert keine Codes, Sitzungswerte, Bildinhalte oder EXIF.
 - Der Party-Code ist ein gemeinsamer Zugang, keine persönliche Identifizierung.
   Wer ihn erhält, kann ihn weitergeben. Ersetze ihn nach Bedarf.
+- Beim ersten Beitritt erzeugt der Browser eine zufällige Kennung und speichert sie
+  lokal. Nach der Namenswahl kann die Website damit eine abgelaufene oder beim
+  Browser-Schließen verlorene Sitzung automatisch wiederherstellen. Die Kennung
+  wird nur als party-spezifischer Hash gespeichert, nicht in der Galerie gezeigt.
+  Das Löschen der Website-Daten im Browser entfernt diese Wiedererkennung.
+- Das Profilmenü zeigt für die Fehlersuche eine kurze Nutzer- und Geräte-ID. Das
+  ist eine zufällige, party-spezifische App-Kennung und keine Hardware-, Werbe-
+  oder Betriebssystem-ID. Im selben Menü steht die Zahl der von diesem Profil
+  veröffentlichten Fotos.
+- Neue Fotos enthalten eine Momentaufnahme des gewählten Anzeigenamens. Damit
+  bleibt sichtbar, wer ein Bild hochgeladen hat, auch wenn die Person später nicht
+  mehr auf die Website zugreift.
 
 ## Speicherlayout und Upload-Wiederholung
 
@@ -134,14 +187,50 @@ photos/<UUID>/original
 photos/<UUID>/display.jpg
 photos/<UUID>/thumb.jpg
 published/<UUID>.json
+users/<PARTY-GERÄTE-HASH>.json
+users/<PARTY-GERÄTE-HASH>/uploads/<FOTO-UUID>.json
 ```
 
 Die Originaldatei hat einen SHA-256-Wert als Objektmetadatum. Alle Schreibvorgänge
 verwenden eine GCS-Generation-Vorbedingung (`ifGenerationMatch=0`). Ein bereits
 verwendeter Upload-Schlüssel mit anderem Bildinhalt wird abgewiesen.
+Wenn ein Foto eine Aufgabe hat, werden Aufgaben-ID und Aufgaben-Text zusätzlich
+als Objektmetadaten am Original gespeichert. Damit können auch ältere
+`published`-Einträge ohne Galerieindex die Aufgabe nachträglich aus dem Bucket
+auflösen. Der versionierte Datensatz und der kompakte Index bleiben die primären
+Quellen; der Originaleintrag ist die robuste Rückfallebene für die laufende
+Aufgabenimplementierung.
 Der abschließende `published`-Datensatz macht das Foto erst nach erfolgreicher
 Speicherung aller drei Dateien sichtbar. Wiederholungen nach einem Abbruch
 ergänzen fehlende Objekte und erstellen keinen zweiten Galerieeintrag.
+Für angemeldete Nutzer wird zusätzlich pro veröffentlichtem Foto ein unveränderliches
+Upload-Ereignis gespeichert. Die Gerätekennung ist bereits durch den Party-Code
+abgegrenzt. Weil der Foto-Schlüssel Teil des Objektnamens ist, erhöhen erneute
+Übertragungen desselben Uploads den Wert `photos_uploaded` nicht doppelt. Profile,
+die schon vor dieser Funktion bestanden, werden beim ersten Öffnen einmalig aus
+den vorhandenen Foto-Autoren nachgezogen.
+
+Der JSON-Datensatz unter `published/` ist versioniert und enthält einen
+erweiterbaren `metadata`-Block. Bei Aufgaben sieht er beispielsweise so aus:
+
+```json
+{
+  "schema_version": 1,
+  "metadata": {
+    "task": {
+      "id": "gastgeber",
+      "text": "Mach ein Foto mit einem der Gastgeber."
+    }
+  }
+}
+```
+
+Der vollständige Datensatz enthält zusätzlich Foto-ID, Format, Größe, Maße und
+Prüfsumme. Der `published`-Blob trägt denselben Metadatenblock kompakt codiert als
+GCS-Objektmetadatum. Dadurch kann die Galerie Aufgaben zusammen mit den Fotos
+auflisten, ohne für jedes Bild einen zusätzlichen Objektabruf auszuführen. Fotos
+ohne Aufgabe erhalten einen leeren `metadata`-Block. Dieses Schema kann später um
+weitere Metadaten ergänzt werden.
 
 Abgebrochene, nie wiederholte Uploads können unveröffentlichte Objekte unter
 `photos/` hinterlassen. Sie sind über die App nicht abrufbar, verursachen aber
@@ -187,7 +276,8 @@ Cold Starts sind akzeptiert. 1 GiB ermöglicht die Bearbeitung großer Handyfoto
 wobei pro Instanz nur eine Konvertierung gleichzeitig läuft.
 
 Es gibt keine garantierte Nullrechnung: Foto-/Image-/Quellcode-Speicherung,
-Operationen, Builds und Internet-Downloads können kostenpflichtig bleiben.
+Operationen, Firestore-Lesezugriffe, Builds und Internet-Downloads können
+kostenpflichtig bleiben.
 Das Maximum von zwei Instanzen ist **kein hartes Budgetlimit**. Es können zudem
 vorübergehende Überhänge bei Deployments/Plattformwartung auftreten.
 Rate-Limits sind pro Instanz und im Speicher (30 fehlgeschlagene Anmeldungen je
@@ -209,7 +299,8 @@ Der Foto-Bucket bleibt dabei erhalten. Für vollständigen Rückbau erst exporti
 und den Export prüfen; anschließend die Fotoobjekte und den Bucket, die
 Artifact-Registry-Images/das Repository `cloud-run-source-deploy`, den Source-Bucket
 `run-sources-project-8b626ca4-30b1-415b-84b-europe-west1`, das Secret sowie die beiden
-Service Accounts gezielt entfernen. Keine fremden Projektressourcen löschen.
+Service Accounts und die benannte Firestore-Datenbank `fotovibe` gezielt entfernen.
+Keine fremden Projektressourcen löschen.
 Es gibt absichtlich keinen automatisch ausgeführten destruktiven Rückbau.
 
 ## Tests
@@ -230,10 +321,13 @@ make smoke
 Vor der Feier auf **echtem iPhone/Safari und Android/Chrome** prüfen:
 
 1. Party-Code eingeben, Kamera starten, Zugriff erlauben oder abbrechen.
-2. Hoch- und Querformat aufnehmen, verwerfen, erneut aufnehmen, bestätigen.
-3. JPEG und vorhandenes HEIC aus der Bibliothek auswählen; Vorschau abwarten.
-4. Upload, Erfolg, Galerie auf zweitem Gerät und Original-Download prüfen.
-5. Schlechtes Netz/Verbindungsabbruch testen: Fehlermeldung, Wiederholung, kein Duplikat.
-6. In Messenger-internen Browsern bei Problemen in Safari/Chrome wechseln.
+2. Aufgabe ziehen, eine andere Aufgabe wählen, die Einblendung in Kamera und
+   Vorschau verschieben, aus dem Bild schieben und wieder einblenden.
+3. Hoch- und Querformat im Vollbild aufnehmen, zur Kamera zurückgehen, erneut
+   aufnehmen und den Upload bestätigen.
+4. JPEG und vorhandenes HEIC aus der Bibliothek auswählen; Vorschau abwarten.
+5. Upload, Erfolg, Galerie auf zweitem Gerät und Original-Download prüfen.
+6. Schlechtes Netz/Verbindungsabbruch testen: Fehlermeldung, Wiederholung, kein Duplikat.
+7. In Messenger-internen Browsern bei Problemen in Safari/Chrome wechseln.
 
 Browsergrößen-Simulation ersetzt diese Geräteprüfung nicht.

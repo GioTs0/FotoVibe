@@ -14,6 +14,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY fotovibe fotovibe
 COPY static static
+COPY infra/tasks.json infra/tasks.json
 COPY --from=assets /assets/static/vendor static/vendor
 RUN useradd --system --uid 10001 --create-home fotovibe
 USER fotovibe

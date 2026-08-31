@@ -1,0 +1,52 @@
+[
+  {
+    "id": "ausgelassenste-person",
+    "text": "Mach ein Foto mit der Person, die heute am ausgelassensten feiert.",
+    "enabled": true
+  },
+  {
+    "id": "gastgeber",
+    "text": "Mach ein Foto mit einem der Gastgeber.",
+    "enabled": true
+  },
+  {
+    "id": "festival",
+    "text": "Mach ein Foto mit jemandem, mit dem du schon einmal auf einem Festival warst.",
+    "enabled": true
+  },
+  {
+    "id": "neue-bekanntschaft",
+    "text": "Finde jemanden, den du heute zum ersten Mal getroffen hast, und macht zusammen ein Foto.",
+    "enabled": true
+  },
+  {
+    "id": "drei-generationen",
+    "text": "Mach ein Gruppenfoto mit mindestens drei Generationen.",
+    "enabled": true
+  },
+  {
+    "id": "tanzmove",
+    "text": "Fotografiere den besten Tanzmove des Abends.",
+    "enabled": true
+  },
+  {
+    "id": "gleiches-getraenk",
+    "text": "Mach ein Foto mit jemandem, der dasselbe Getränk hat wie du.",
+    "enabled": true
+  },
+  {
+    "id": "familienfoto",
+    "text": "Stellt gemeinsam ein altes Familienfoto nach.",
+    "enabled": true
+  },
+  {
+    "id": "weiteste-anreise",
+    "text": "Mach ein Selfie mit der Person, die am weitesten angereist ist.",
+    "enabled": true
+  },
+  {
+    "id": "kleiner-moment",
+    "text": "Fotografiere einen kleinen Moment, den sonst vielleicht niemand bemerkt.",
+    "enabled": true
+  }
+]

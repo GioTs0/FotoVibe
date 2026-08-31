@@ -18,6 +18,16 @@ register_heif_opener()
 ORIGIN = {"Origin": "https://testserver"}
 
 
+class TestTaskStore:
+    __test__ = False
+
+    def __init__(self, tasks):
+        self.tasks = tasks
+
+    def enabled(self):
+        return self.tasks
+
+
 def picture(fmt="JPEG", color="red", orientation=None):
     # HEIF's encoder normalizes the orientation tag; provide already-oriented pixels.
     image = Image.new("RGB", (80, 120) if fmt == "HEIF" and orientation == 6 else (120, 80), color)
@@ -44,11 +54,24 @@ def login(client):
     return response
 
 
-def upload(client, data=None, photo_id=None):
+def login_device(client, device_id):
+    response = client.post(
+        "/api/session",
+        json={"code": "test code", "device_id": device_id},
+        headers=ORIGIN,
+    )
+    assert response.status_code == 200
+    return response
+
+
+def upload(client, data=None, photo_id=None, task_id=None):
+    fields = {"upload_id": photo_id or str(uuid.uuid4())}
+    if task_id is not None:
+        fields["task_id"] = task_id
     return client.post(
         "/api/photos",
         headers=ORIGIN,
-        data={"upload_id": photo_id or str(uuid.uuid4())},
+        data=fields,
         files={"photo": ("photo.jpg", data if data is not None else picture(), "image/jpeg")},
     )
 
@@ -59,6 +82,7 @@ def test_private_endpoints_and_cookie(env):
     for path in [
         "/api/session",
         "/api/photos",
+        "/api/tasks/random",
         f"/api/photos/{photo_id}/original",
         f"/api/photos/{photo_id}/thumb",
     ]:
@@ -89,6 +113,25 @@ def test_origin_and_invalid_login(env):
         assert client.post("/api/session", json=bad, headers=ORIGIN).status_code == 400
 
 
+def test_configured_test_code_uses_the_same_gallery(tmp_path):
+    store = LocalStore(tmp_path)
+    app = create_app(Settings("PRIMARY-CODE", "test-signing-key", True, ("1234",)), store)
+    primary = TestClient(app, base_url="https://testserver")
+    test_user = TestClient(app, base_url="https://testserver")
+
+    assert (
+        primary.post("/api/session", json={"code": "primary code"}, headers=ORIGIN).status_code
+        == 200
+    )
+    assert (
+        test_user.post("/api/session", json={"code": "1 2 3 4"}, headers=ORIGIN).status_code == 200
+    )
+
+    photo_id = str(uuid.uuid4())
+    assert upload(test_user, photo_id=photo_id).status_code == 201
+    assert photo_id in {photo["id"] for photo in primary.get("/api/photos").json()["photos"]}
+
+
 def test_expired_and_changed_code_sessions(env, monkeypatch):
     client, _, store = env
     login(client)
@@ -106,6 +149,77 @@ def test_expired_and_changed_code_sessions(env, monkeypatch):
     client.cookies.clear()
     client.cookies.set(COOKIE, "tampered")
     assert client.get("/api/photos").status_code == 401
+
+
+def test_named_device_restores_session_and_authors_photos(env):
+    client, _, _ = env
+    device_id = str(uuid.uuid4())
+
+    assert login_device(client, device_id).json() == {"authenticated": True, "user": None}
+    created = client.post("/api/users/me", json={"name": "  Lea  Sommer "}, headers=ORIGIN)
+    assert created.status_code == 200
+    user = created.json()["user"]
+    assert user["name"] == "Lea Sommer"
+    assert user["id"].startswith("u_")
+    assert user["device_id"].startswith("d_")
+    assert user["values"] == {"photos_uploaded": 0}
+    assert client.get("/api/session").json() == {"authenticated": True, "user": user}
+
+    photo = upload(client)
+    assert photo.status_code == 201
+    author = {"id": user["id"], "name": user["name"]}
+    assert photo.json()["metadata"] == {"author": author}
+    listed = client.get("/api/photos").json()["photos"]
+    assert listed[0]["author"] == author
+    assert listed[0]["metadata"]["author"] == author
+    updated = client.get("/api/session").json()["user"]
+    assert updated["values"] == {"photos_uploaded": 1}
+
+    client.cookies.clear()
+    restored = client.post("/api/session/restore", json={"device_id": device_id}, headers=ORIGIN)
+    assert restored.status_code == 200
+    assert restored.json() == {"authenticated": True, "user": updated}
+    assert client.get("/api/photos").status_code == 200
+
+
+def test_user_upload_value_is_idempotent_and_recovers_interrupted_marker(env, monkeypatch):
+    client, _, store = env
+    login_device(client, str(uuid.uuid4()))
+    client.post("/api/users/me", json={"name": "Mara"}, headers=ORIGIN)
+    photo_id = str(uuid.uuid4())
+    original_put = store.put
+    marker_failed = False
+
+    def fail_first_marker(key, *args, **kwargs):
+        nonlocal marker_failed
+        if "/uploads/" in key and not marker_failed:
+            marker_failed = True
+            raise ServiceUnavailable("simulated marker interruption")
+        return original_put(key, *args, **kwargs)
+
+    monkeypatch.setattr(store, "put", fail_first_marker)
+    assert upload(client, photo_id=photo_id).status_code == 503
+    assert len(store.published()) == 1
+
+    monkeypatch.setattr(store, "put", original_put)
+    assert upload(client, photo_id=photo_id).status_code == 200
+    assert upload(client, photo_id=photo_id).status_code == 200
+    profile = client.get("/api/session").json()["user"]
+    assert profile["values"] == {"photos_uploaded": 1}
+    assert len([obj for obj in store.list_prefix("users/") if "/uploads/" in obj.name]) == 1
+
+
+def test_unknown_device_cannot_restore_and_name_is_set_once(env):
+    client, _, _ = env
+    device_id = str(uuid.uuid4())
+    assert (
+        client.post("/api/session/restore", json={"device_id": device_id}, headers=ORIGIN).status_code
+        == 401
+    )
+    login_device(client, device_id)
+    assert client.post("/api/users/me", json={"name": "A"}, headers=ORIGIN).status_code == 400
+    assert client.post("/api/users/me", json={"name": "Mara"}, headers=ORIGIN).status_code == 200
+    assert client.post("/api/users/me", json={"name": "Nora"}, headers=ORIGIN).status_code == 409
 
 
 @pytest.mark.parametrize("fmt", ["JPEG", "PNG", "WEBP", "HEIF"])
@@ -206,6 +320,146 @@ def test_pagination_is_stable_when_new_photo_arrives(env):
         cursor = page["next_cursor"]
     assert len(ids) == len(set(ids)) == 65
     assert client.get("/api/photos?cursor=invalid").status_code == 400
+
+
+def test_random_task_and_immediate_repeat_exclusion(env):
+    client, _, _ = env
+    login(client)
+    first = client.get("/api/tasks/random")
+    assert first.status_code == 200
+    assert first.json()["id"]
+    assert first.json()["text"]
+    second = client.get("/api/tasks/random", params={"exclude": first.json()["id"]})
+    assert second.status_code == 200
+    assert second.json()["id"] != first.json()["id"]
+    assert client.get("/api/tasks/random?exclude=../bad").status_code == 400
+
+
+def test_random_task_handles_empty_store(tmp_path):
+    app = create_app(
+        Settings("TEST-CODE", "test-signing-key"),
+        LocalStore(tmp_path),
+        TestTaskStore([]),
+    )
+    client = TestClient(app, base_url="https://testserver")
+    login(client)
+    response = client.get("/api/tasks/random")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Gerade ist keine Foto-Aufgabe verfügbar."
+
+
+def test_task_snapshot_is_stored_with_photo_and_listed(env):
+    client, _, store = env
+    login(client)
+    task = client.get("/api/tasks/random").json()
+
+    response = upload(client, task_id=task["id"])
+
+    assert response.status_code == 201
+    record = response.json()
+    assert record["schema_version"] == 1
+    assert record["metadata"] == {"task": task}
+    stored = json.loads(store.read(f"published/{record['id']}.json"))
+    assert stored["metadata"] == {"task": task}
+    listed = client.get("/api/photos").json()["photos"][0]
+    assert listed["metadata"] == {"task": task}
+    assert listed["task"] == task
+    assert store.info(f"published/{record['id']}.json").metadata["fotovibe_metadata"]
+    original_metadata = store.info(f"photos/{record['id']}/original").metadata
+    assert original_metadata["task_id"] == task["id"]
+    assert original_metadata["task_text"] == task["text"]
+    assert original_metadata["fotovibe_metadata"]
+    play_photo = client.get("/api/photos/play", params={"count": 1}).json()["photos"][0]
+    assert play_photo["task"] == task
+
+
+def test_gallery_reads_task_metadata_from_older_original_object(tmp_path):
+    store = LocalStore(tmp_path)
+    app = create_app(Settings("TEST-CODE", "test-signing-key"), store)
+    client = TestClient(app, base_url="https://testserver")
+    login(client)
+    photo_id = str(uuid.uuid4())
+    store.put(
+        f"photos/{photo_id}/original",
+        picture(),
+        "image/jpeg",
+        {"task_id": "altmodisch", "task_text": "Zeig dein bestes Partygesicht."},
+    )
+    store.put(
+        f"published/{photo_id}.json",
+        json.dumps({"id": photo_id, "metadata": {}}).encode(),
+        "application/json",
+    )
+
+    listed = client.get("/api/photos").json()["photos"]
+
+    assert listed[0]["task"] == {
+        "id": "altmodisch",
+        "text": "Zeig dein bestes Partygesicht.",
+    }
+
+
+def test_play_endpoint_requires_session_and_returns_unique_photos(env):
+    client, _, store = env
+    photo_ids = [str(uuid.uuid4()) for _ in range(5)]
+    for photo_id in photo_ids:
+        store.put(
+            f"published/{photo_id}.json",
+            json.dumps({"id": photo_id, "metadata": {}}).encode(),
+            "application/json",
+        )
+
+    assert client.get("/api/photos/play").status_code == 401
+    login(client)
+    result = client.get("/api/photos/play", params={"count": 4})
+    assert result.status_code == 200
+    selected = [photo["id"] for photo in result.json()["photos"]]
+    assert len(selected) == len(set(selected)) == 4
+    assert set(selected) <= set(photo_ids)
+
+    excluded = client.get(
+        "/api/photos/play",
+        params={"count": 4, "exclude": ",".join(selected)},
+    )
+    assert excluded.status_code == 200
+    assert not {photo["id"] for photo in excluded.json()["photos"]} & set(selected)
+    assert client.get("/api/photos/play", params={"count": 7}).status_code == 400
+    assert client.get("/api/photos/play?exclude=../bad").status_code == 400
+
+
+def test_upload_rejects_unknown_task_without_publishing(env):
+    client, _, store = env
+    login(client)
+
+    response = upload(client, task_id="nicht-vorhanden")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Diese Foto-Aufgabe ist nicht mehr verfügbar. Bitte neu ziehen."
+    )
+    assert not store.published()
+
+
+def test_upload_id_cannot_be_reused_with_different_task(tmp_path):
+    tasks = TestTaskStore(
+        [
+            {"id": "erste", "text": "Erste Aufgabe"},
+            {"id": "zweite", "text": "Zweite Aufgabe"},
+        ]
+    )
+    app = create_app(
+        Settings("TEST-CODE", "test-signing-key"),
+        LocalStore(tmp_path),
+        tasks,
+    )
+    client = TestClient(app, base_url="https://testserver")
+    login(client)
+    photo_id = str(uuid.uuid4())
+    raw = picture()
+
+    assert upload(client, raw, photo_id, "erste").status_code == 201
+    assert upload(client, raw, photo_id, "erste").status_code == 200
+    assert upload(client, raw, photo_id, "zweite").status_code == 409
 
 
 def test_concurrent_duplicate_uploads_across_instances(env):

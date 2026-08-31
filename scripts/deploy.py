@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -15,6 +16,8 @@ STORAGE_REGION = "europe-west3"
 SERVICE = "fotovibe"
 BUCKET = "fotovibe-520703150508-photos"
 AUTH_SECRET = "fotovibe-auth"
+TEST_CODE = "1234"
+FIRESTORE_DATABASE = "fotovibe"
 DNS_ZONE = "zone-180-foto-com"
 DOMAINS = ("180-foto.com", "www.180-foto.com")
 RUNTIME = f"fotovibe-runtime@{PROJECT}.iam.gserviceaccount.com"
@@ -52,6 +55,46 @@ def secret_version():
         "--limit=1",
         "--format=value(name)",
     ).split("/")[-1]
+
+
+def ensure_firestore():
+    raw = gc(
+        "firestore",
+        "databases",
+        "describe",
+        f"--database={FIRESTORE_DATABASE}",
+        "--format=json",
+        missing_ok=True,
+    )
+    if raw is None:
+        gc(
+            "firestore",
+            "databases",
+            "create",
+            f"--database={FIRESTORE_DATABASE}",
+            f"--location={STORAGE_REGION}",
+            "--type=firestore-native",
+            live=True,
+        )
+    else:
+        database = json.loads(raw)
+        if database.get("locationId", "").lower() != STORAGE_REGION:
+            raise RuntimeError(
+                f"Existing Firestore database {FIRESTORE_DATABASE} is not in {STORAGE_REGION}"
+            )
+    gc(
+        "projects",
+        "add-iam-policy-binding",
+        PROJECT,
+        f"--member=serviceAccount:{RUNTIME}",
+        "--role=roles/datastore.viewer",
+        "--condition=None",
+    )
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/manage_tasks.py"), "seed"],
+        cwd=ROOT,
+        check=True,
+    )
 
 
 def ensure_domain_mapping(domain):
@@ -173,6 +216,7 @@ def main():
         "iam.googleapis.com",
         "storage.googleapis.com",
         "dns.googleapis.com",
+        "firestore.googleapis.com",
     )
     print("APIs enabled. Configuring identities and private storage …", flush=True)
     ensure_sa("fotovibe-runtime")
@@ -233,13 +277,18 @@ def main():
             f"--member=serviceAccount:{RUNTIME}",
             f"--role={role}",
         )
+    ensure_firestore()
 
     found = gc("secrets", "describe", AUTH_SECRET, "--format=json", missing_ok=True)
+    auth_path = local / "auth.json"
     if found is None or args.rotate_code:
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         code = "".join(secrets.choice(alphabet) for _ in range(10))
-        values = {"party_code": code[:5] + "-" + code[5:], "session_key": secrets.token_urlsafe(48)}
-        auth_path = local / "auth.json"
+        values = {
+            "party_code": code[:5] + "-" + code[5:],
+            "session_key": secrets.token_urlsafe(48),
+            "test_codes": [TEST_CODE],
+        }
         auth_path.write_text(json.dumps(values))
         auth_path.chmod(0o600)
         if found is None:
@@ -252,6 +301,21 @@ def main():
                 f"--data-file={auth_path}",
             )
         else:
+            gc("secrets", "versions", "add", AUTH_SECRET, f"--data-file={auth_path}")
+    else:
+        current_version = secret_version()
+        values = json.loads(
+            gc("secrets", "versions", "access", current_version, f"--secret={AUTH_SECRET}")
+        )
+        configured_test_codes = values.get("test_codes", [])
+        if not isinstance(configured_test_codes, list) or not all(
+            isinstance(code, str) for code in configured_test_codes
+        ):
+            raise RuntimeError("Existing auth secret has invalid test_codes")
+        if TEST_CODE not in configured_test_codes:
+            values["test_codes"] = [*configured_test_codes, TEST_CODE]
+            auth_path.write_text(json.dumps(values))
+            auth_path.chmod(0o600)
             gc("secrets", "versions", "add", AUTH_SECRET, f"--data-file={auth_path}")
     gc(
         "secrets",
@@ -288,7 +352,7 @@ def main():
         "--allow-unauthenticated",
         "--invoker-iam-check",
         "--default-url",
-        f"--set-env-vars=PHOTO_BUCKET={BUCKET},GOOGLE_CLOUD_PROJECT={PROJECT},AUTH_SECRET_FILE=/var/run/secrets/fotovibe/auth.json",
+        f"--set-env-vars=PHOTO_BUCKET={BUCKET},GOOGLE_CLOUD_PROJECT={PROJECT},FIRESTORE_DATABASE={FIRESTORE_DATABASE},AUTH_SECRET_FILE=/var/run/secrets/fotovibe/auth.json",
         f"--set-secrets=/var/run/secrets/fotovibe/auth.json={AUTH_SECRET}:{version}",
         "--labels=app=fotovibe",
         live=True,

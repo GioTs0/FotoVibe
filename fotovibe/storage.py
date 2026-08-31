@@ -68,11 +68,14 @@ class CloudStore:
             while chunk := source.read(256 * 1024):
                 yield chunk
 
-    def published(self):
+    def list_prefix(self, prefix):
         return [
             self._info(blob)
-            for blob in self.bucket.list_blobs(prefix="published/", timeout=30, retry=self.retry)
+            for blob in self.bucket.list_blobs(prefix=prefix, timeout=30, retry=self.retry)
         ]
+
+    def published(self):
+        return self.list_prefix("published/")
 
 
 class LocalStore:
@@ -111,9 +114,15 @@ class LocalStore:
             while chunk := source.read(256 * 1024):
                 yield chunk
 
-    def published(self):
+    def list_prefix(self, prefix):
         with self.lock:
+            directory = self.root / prefix.rstrip("/")
+            if not directory.exists():
+                return []
             return [
                 ObjectInfo(**json.loads(path.read_text()))
-                for path in (self.root / "published").glob("*.json.info")
+                for path in directory.rglob("*.info")
             ]
+
+    def published(self):
+        return self.list_prefix("published/")

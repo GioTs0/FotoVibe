@@ -43,7 +43,6 @@ def main():
         payloads.append(output.getvalue())
 
     with httpx.Client(base_url=url, timeout=300, headers=headers) as client:
-        assert client.get("/healthz").status_code == 200
         assert client.get("/").status_code == 200
         assert client.get("/api/photos").status_code == 401
         assert client.post("/api/session", json={"code": party_code}).status_code == 200

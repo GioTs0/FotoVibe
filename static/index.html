@@ -15,7 +15,23 @@
   <a class="skip" href="#main">Zum Inhalt</a>
   <header class="topbar">
     <a class="brand" href="/" aria-label="180. Geburtstag Startseite"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 6.5 8H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-2.5L16 5Z"/><circle cx="12" cy="14" r="4"/></svg>180. Geburtstag</a>
-    <nav aria-label="Hauptnavigation"><a href="/" id="nav-upload">Foto teilen</a><a href="/gallery" id="nav-gallery">Galerie</a><button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="Dunkelmodus einschalten" title="Dunkelmodus einschalten"><svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.2A8.5 8.5 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg><svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><span id="theme-label">Dunkel</span></button></nav>
+    <nav aria-label="Hauptnavigation">
+      <a href="/" id="nav-upload">Foto teilen</a><a href="/gallery" id="nav-gallery">Galerie</a>
+      <div id="profile-control" class="profile-control" hidden>
+        <button id="profile-button" class="profile-button" type="button" aria-expanded="false" aria-controls="profile-menu"><span id="profile-initial" class="profile-initial" aria-hidden="true">?</span><span class="sr-only">Profil öffnen</span></button>
+        <div id="profile-menu" class="profile-menu" hidden>
+          <p class="profile-label">Angemeldet als</p><strong id="profile-name"></strong>
+          <dl class="profile-details">
+            <div><dt>Nutzer-ID</dt><dd><code id="profile-user-id"></code></dd></div>
+            <div><dt>Geräte-ID</dt><dd><code id="profile-device-id"></code></dd></div>
+            <div class="profile-value"><dt>Hochgeladene Fotos</dt><dd id="profile-upload-count">0</dd></div>
+          </dl>
+          <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="Dunkelmodus einschalten" title="Dunkelmodus einschalten"><svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.2A8.5 8.5 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg><svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><span id="theme-label">Dunkel</span></button>
+          <div class="admin-placeholder"><span>Admin-Panel</span><p>Die Verwaltungsfunktionen folgen hier als Nächstes.</p></div>
+          <button id="profile-logout" class="text-button" type="button">Abmelden</button>
+        </div>
+      </div>
+    </nav>
   </header>
   <main id="main">
     <p id="boot" class="muted narrow" role="status">180. Geburtstag wird geöffnet …</p>
@@ -32,41 +48,94 @@
       </form>
       <p class="footnote">Ohne Konto. Ohne Tracking. Nur eure Fotos.</p>
     </section>
+    <section id="profile-setup" class="narrow" hidden aria-labelledby="profile-setup-title">
+      <p class="eyebrow">Dein Platz in der Galerie</p>
+      <h1 id="profile-setup-title">Wie dürfen wir dich nennen?</h1>
+      <p class="intro">Dein Name erscheint künftig bei den Fotos, die du teilst. Er bleibt auf diesem Gerät gespeichert.</p>
+      <form id="profile-form">
+        <label for="profile-input">Dein Name</label>
+        <input id="profile-input" name="name" type="text" minlength="2" maxlength="40" autocomplete="name" autocapitalize="words" required aria-describedby="profile-hint profile-error">
+        <p id="profile-hint" class="hint">Zum Beispiel „Lea“ oder „Onkel Martin“.</p>
+        <p id="profile-error" class="error" role="alert"></p>
+        <button id="profile-submit" class="primary" type="submit">Weiter zur Party <span aria-hidden="true">→</span></button>
+      </form>
+    </section>
     <section id="upload" class="narrow" hidden aria-labelledby="upload-title">
       <p class="eyebrow">Für die Momente dazwischen</p>
       <h1 id="upload-title">Halte den Abend fest.</h1>
       <p class="intro">Foto aufnehmen, kurz anschauen und mit der Party teilen.</p>
+      <section id="challenge" class="challenge" aria-label="Foto-Aufgabe">
+        <button id="challenge-draw" class="challenge-trigger" type="button">
+          <span class="challenge-kicker">Foto-Aufgabe</span>
+          <strong>Aufgabe ziehen</strong>
+          <span class="challenge-arrow" aria-hidden="true">→</span>
+        </button>
+        <div id="challenge-panel" class="challenge-panel" hidden>
+          <h2 id="challenge-text" class="challenge-text" aria-live="polite"></h2>
+          <div class="actions challenge-actions">
+            <button id="challenge-camera" class="primary" type="button">Foto aufnehmen</button>
+            <button id="challenge-library" class="secondary" type="button">Bild auswählen</button>
+          </div>
+          <div class="challenge-links">
+            <button id="challenge-again" class="text-button" type="button">Andere Aufgabe</button>
+            <button id="challenge-cancel" class="text-button" type="button">Ohne Aufgabe weiter</button>
+          </div>
+        </div>
+        <p id="challenge-error" class="error" role="alert"></p>
+      </section>
+      <div id="free-divider" class="choice-divider" aria-hidden="true"><span>oder frei fotografieren</span></div>
       <div id="pick-actions" class="actions">
         <button id="camera" class="primary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 6.5 8H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-2.5L16 5Z"/><circle cx="12" cy="14" r="4"/></svg>Foto aufnehmen</button>
         <button id="library" class="secondary" type="button">Aus Fotobibliothek wählen</button>
         <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
         <input id="library-input" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" hidden>
       </div>
-      <section id="camera-view" class="camera-view" hidden aria-labelledby="camera-title">
-        <h2 id="camera-title">Kamera</h2>
-        <div class="camera-frame"><video id="camera-video" autoplay muted playsinline aria-label="Live-Vorschau der Kamera"></video></div>
-        <p id="camera-status" class="muted" role="status">Kamera wird geöffnet …</p>
-        <div class="actions camera-controls">
-          <button id="shutter" class="primary" type="button" disabled>Foto auslösen</button>
-          <button id="switch-camera" class="secondary" type="button" hidden>Kamera wechseln</button>
-          <button id="camera-fallback" class="secondary" type="button" hidden>Gerätekamera oder Datei öffnen</button>
-          <button id="close-camera" class="text-button" type="button">Abbrechen</button>
+      <section id="camera-view" class="capture-screen camera-view" hidden aria-labelledby="camera-title" aria-modal="true" role="dialog">
+        <h2 id="camera-title" class="sr-only">Kamera</h2>
+        <div id="camera-frame" class="camera-frame"><video id="camera-video" autoplay muted playsinline aria-label="Live-Vorschau der Kamera"></video></div>
+        <div class="capture-topbar">
+          <button id="close-camera" class="capture-icon-button" type="button" aria-label="Kamera schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+          <p id="camera-status" class="capture-status" role="status">Kamera wird geöffnet …</p>
+          <button id="switch-camera" class="capture-icon-button" type="button" hidden aria-label="Kamera drehen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-4V3"/><path d="M4 17h4v4"/><path d="M6.6 8.2A7 7 0 0 1 18.8 7M5.2 17A7 7 0 0 0 17.4 15.8"/></svg></button>
+        </div>
+        <aside id="camera-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
+          <span class="capture-task-handle" aria-hidden="true">⠿</span>
+          <div><span>Foto-Aufgabe</span><p id="camera-task-text"></p></div>
+          <button id="camera-task-hide" class="capture-task-hide" type="button" aria-label="Aufgabe ausblenden">×</button>
+        </aside>
+        <button id="camera-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
+        <div class="capture-bottombar camera-controls">
+          <button id="camera-fallback" class="capture-fallback" type="button" hidden>Gerätekamera öffnen</button>
+          <button id="shutter" class="shutter" type="button" disabled aria-label="Foto aufnehmen"><span aria-hidden="true"></span></button>
         </div>
       </section>
-      <div id="review" hidden>
+      <section id="review" class="capture-screen capture-review" hidden aria-labelledby="review-title" aria-modal="true" role="dialog">
+        <h2 id="review-title" class="sr-only">Foto prüfen</h2>
         <img id="preview" alt="Vorschau deines ausgewählten Fotos" hidden>
-        <p id="file-info" class="hint"></p>
-        <p id="preview-status" role="status" class="muted"></p>
-        <div id="progress-wrap" hidden><progress id="progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress><p id="progress-text" role="status"></p></div>
-        <div class="actions"><button id="send" class="primary" type="button" disabled>Foto hochladen <span aria-hidden="true">↑</span></button><button id="discard" class="secondary" type="button">Verwerfen / neu aufnehmen</button></div>
-      </div>
+        <div class="capture-topbar review-topbar">
+          <button id="discard" class="capture-icon-button capture-back-button" type="button" aria-label="Zurück zur Kamera"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span id="discard-label">Zur Kamera</span></button>
+          <strong>Foto prüfen</strong>
+          <span class="capture-topbar-spacer" aria-hidden="true"></span>
+        </div>
+        <aside id="active-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
+          <span class="capture-task-handle" aria-hidden="true">⠿</span>
+          <div><span>Foto-Aufgabe</span><p id="active-task-text"></p></div>
+          <button id="preview-task-hide" class="capture-task-hide" type="button" aria-label="Aufgabe ausblenden">×</button>
+        </aside>
+        <button id="preview-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
+        <div class="review-bottombar">
+          <p id="file-info" class="capture-file-info"></p>
+          <p id="preview-status" role="status" class="capture-preview-status"></p>
+          <p id="upload-error" class="capture-error" role="alert"></p>
+          <div id="progress-wrap" hidden><progress id="progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress><p id="progress-text" role="status"></p></div>
+          <button id="send" class="capture-upload" type="button" disabled>Foto hochladen <span aria-hidden="true">↑</span></button>
+        </div>
+      </section>
       <div id="success" hidden role="status"><span class="success-mark" aria-hidden="true">✓</span><h2>Dein Moment ist dabei.</h2><p>Das Foto ist jetzt in unserer Galerie.</p><div class="actions"><button id="another" class="primary" type="button">Noch ein Foto teilen</button><a class="button secondary" href="/gallery">Zur Galerie</a></div></div>
-      <p id="upload-error" class="error" role="alert"></p>
-      <aside class="privacy"><p>Du entscheidest, was du teilst.</p><p>Erst mit „Foto hochladen“ wird dein Bild übertragen. Alle mit dem Party-Code können es ansehen und herunterladen. Bitte teile nur Fotos, mit deren Veröffentlichung die abgebildeten Personen einverstanden sind.</p><p>Originale bleiben erhalten und können Standortdaten enthalten. Max. 25 MiB / 64 Megapixel. Keine Videos.</p></aside>
     </section>
     <section id="gallery" class="gallery" hidden aria-labelledby="gallery-title">
       <div id="gallery-overview">
-        <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><button id="refresh" class="secondary" type="button">Aktualisieren</button></div>
+        <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><div class="gallery-actions"><a id="play-link" class="button primary" href="/play?autoplay=1">Fotobuch starten <span aria-hidden="true">▶</span></a><button id="refresh" class="secondary" type="button">Aktualisieren</button></div></div>
         <p class="muted" id="gallery-status" role="status">Die Fotos werden geladen …</p>
         <p id="gallery-error" class="error" role="alert"></p>
         <div id="gallery-empty" class="empty" hidden><h2>Der erste Moment fehlt noch.</h2><p>Mach den Anfang und teile ein Foto von der Party.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
@@ -77,8 +146,30 @@
         <button id="back-to-grid" class="secondary" type="button">← Zurück zur Galerie</button>
         <img id="detail-image" alt="Partyfoto in großer Ansicht">
         <p id="detail-status" role="status"></p>
+        <p id="detail-author" class="detail-author" hidden></p>
+        <aside id="detail-task" class="detail-task" hidden>
+          <span>Foto-Aufgabe</span>
+          <p id="detail-task-text"></p>
+        </aside>
         <a id="download" class="button primary" download>Original herunterladen <span aria-hidden="true">↓</span></a>
       </div>
+    </section>
+    <section id="play" class="play-page" hidden aria-labelledby="play-title">
+      <div class="play-heading">
+        <div><a class="back-link" href="/gallery">← Zur Galerie</a><p class="eyebrow">Fotobuch</p><h1 id="play-title">Der Abend blättert weiter.</h1><p id="play-status" class="muted" role="status">Die nächste Seite wird vorbereitet …</p></div>
+        <div class="play-actions"><button id="play-toggle" class="primary" type="button"><span aria-hidden="true">▶</span> Abspielen</button><button id="play-next" class="secondary" type="button">Nächste Seite <span aria-hidden="true">→</span></button></div>
+      </div>
+      <div id="play-error" class="error" role="alert"></div>
+      <div id="book-stage" class="book-stage" aria-live="polite" aria-atomic="true">
+        <span class="book-spark spark-one" aria-hidden="true">✦</span><span class="book-spark spark-two" aria-hidden="true">✦</span><span class="book-spark spark-three" aria-hidden="true">✦</span>
+        <div id="book-spread" class="book-spread">
+          <article class="book-page book-page-left"><div class="book-page-label">Eure Momente</div><figure class="book-photo book-photo-large" data-slot="0"><img alt="" loading="eager"><figcaption></figcaption></figure><figure class="book-photo book-photo-small" data-slot="1"><img alt="" loading="lazy"><figcaption></figcaption></figure></article>
+          <div class="book-gutter" aria-hidden="true"><span class="book-sticker">LIVE</span><span class="book-page-number" id="book-page-number">01</span></div>
+          <article class="book-page book-page-right"><div class="book-page-label">180. Geburtstag</div><figure class="book-photo book-photo-large" data-slot="2"><img alt="" loading="eager"><figcaption></figcaption></figure><figure class="book-photo book-photo-small" data-slot="3"><img alt="" loading="lazy"><figcaption></figcaption></figure></article>
+        </div>
+      </div>
+      <div id="play-empty" class="empty play-empty" hidden><h2>Noch keine Seiten im Buch.</h2><p>Sobald die ersten Fotos da sind, blättert hier eure Party weiter.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
+      <p class="play-hint">Neue Fotos bekommen automatisch einen kleinen Vorsprung. Die Seite pausiert, sobald dieser Tab verborgen ist.</p>
     </section>
   </main>
   <footer><span>Gemeinsam aufgenommen. Gemeinsam erinnert.</span><button id="logout" type="button" class="text-button" hidden>Abmelden</button></footer>
