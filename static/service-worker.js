@@ -1,9 +1,9 @@
-const CACHE = 'fotovibe-shell-v4';
+const CACHE = 'fotovibe-shell-v5';
 const SHELL = [
   '/',
   '/static/index.html',
   '/static/style.css',
-  '/static/app.js?v=offline-upload-id-v4',
+  '/static/app.js?v=offline-upload-id-v5',
   '/static/offline-store.js',
   '/static/vendor/heic-to.js',
   '/static/party.jpg',
@@ -160,8 +160,8 @@ function finiteTimestamp(value, fallback) {
 
 async function prepareEntry(entry) {
   const patch = {};
-  if (!validUploadId(entry.uploadId)) {
-    patch.uploadId = validUploadId(entry.id) ? entry.id : crypto.randomUUID();
+  if (!validUploadId(entry.serverPhotoId)) {
+    patch.serverPhotoId = validUploadId(entry.uploadId) ? entry.uploadId : crypto.randomUUID();
   }
   const stored = entry.clientMetadata || {};
   const createdAt = finiteTimestamp(entry.createdAt, Date.now());
@@ -178,8 +178,15 @@ async function prepareEntry(entry) {
 }
 
 async function uploadEntry(entry) {
+  if (!(entry.blob instanceof Blob) || !entry.blob.size) {
+    await updateEntry(entry.id, {
+      status: 'error', progress: 0,
+      lastError: 'Das lokal gespeicherte Foto fehlt. Bitte aus der Liste löschen.',
+    });
+    return false;
+  }
   const form = new FormData();
-  form.append('upload_id', entry.uploadId);
+  form.append('upload_id', entry.serverPhotoId);
   if (entry.task?.task_token) form.append('task_token', entry.task.task_token);
   else if (entry.task?.id) form.append('task_id', entry.task.id);
   if (entry.clientMetadata) form.append('client_metadata', JSON.stringify(entry.clientMetadata));

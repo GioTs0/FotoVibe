@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" href="/static/icon-192.png">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js?v=offline-upload-id-v4" type="module"></script>
+  <script src="/static/app.js?v=offline-upload-id-v5" type="module"></script>
 </head>
 <body>
   <div id="page-backdrop" class="page-backdrop" aria-hidden="true" hidden></div>
@@ -230,6 +230,7 @@
     <div class="queue-detail-image-wrap">
       <button id="queue-detail-close" class="capture-icon-button queue-detail-close" type="button" aria-label="Queue-Detail schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       <img id="queue-detail-image" alt="">
+      <p id="queue-detail-image-unavailable" class="queue-detail-image-unavailable" hidden>Vorschau nicht verfügbar</p>
     </div>
     <div class="queue-detail-bottom">
       <div class="queue-detail-info"><h2 id="queue-detail-title">Vorgemerktes Foto</h2><p id="queue-detail-state" class="queue-detail-state"></p><aside id="queue-detail-task" class="queue-detail-task" hidden><span>Foto-Aufgabe</span><p id="queue-detail-task-text"></p></aside><p id="queue-detail-error" class="queue-detail-error" hidden></p></div>

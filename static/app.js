@@ -25,7 +25,7 @@ let cachedDeviceId = null;
 let authenticated = false;
 let currentUser = null;
 let selected = null;
-let uploadId = null;
+let directServerPhotoId = null;
 let previewUrl = null;
 let previewGeneration = 0;
 let previewMirrored = false;
@@ -72,7 +72,7 @@ let lastQueuedId = null;
 let offlineMode = false;
 let locallySignedOut = false;
 const queueOwner = `page-${crypto.randomUUID()}`;
-const queuePreviewUrls = new Set();
+const queuePreviewUrls = new Map();
 let queueDetailId = null;
 let queueDetailPreviewUrl = null;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -196,14 +196,55 @@ function updateSendAction() {
   }
 }
 
-function releaseQueuePreviews() {
-  queuePreviewUrls.forEach((url) => URL.revokeObjectURL(url));
-  queuePreviewUrls.clear();
+function releaseUnusedQueuePreviews(entries = outboxEntries) {
+  const activeIds = new Set(entries.map((entry) => entry.id));
+  for (const [entryId, url] of queuePreviewUrls) {
+    if (activeIds.has(entryId)) continue;
+    URL.revokeObjectURL(url);
+    queuePreviewUrls.delete(entryId);
+  }
+}
+
+function displayableBlob(value) {
+  return value instanceof Blob && value.size > 0;
+}
+
+function queuePreviewUrl(entry) {
+  const existing = queuePreviewUrls.get(entry.id);
+  if (existing) return existing;
+  const preview = displayableBlob(entry.thumbnail)
+    ? entry.thumbnail
+    : displayableBlob(entry.blob) ? entry.blob : null;
+  if (!preview) return null;
+  const url = URL.createObjectURL(preview);
+  queuePreviewUrls.set(entry.id, url);
+  return url;
+}
+
+function queueThumbnailPlaceholder() {
+  const placeholder = document.createElement('span');
+  placeholder.className = 'queue-thumbnail-placeholder';
+  placeholder.setAttribute('aria-hidden', 'true');
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  const body = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  body.setAttribute('d', 'M4 7h3l1.5-2h7L17 7h3v12H4z');
+  const lens = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  lens.setAttribute('cx', '12');
+  lens.setAttribute('cy', '13');
+  lens.setAttribute('r', '3');
+  svg.append(body, lens);
+  placeholder.append(svg);
+  return placeholder;
 }
 
 function closeQueueDetail() {
   $('queue-detail').hidden = true;
-  $('queue-detail-image').removeAttribute('src');
+  const image = $('queue-detail-image');
+  image.onerror = null;
+  image.removeAttribute('src');
+  image.hidden = false;
+  $('queue-detail-image-unavailable').hidden = true;
   if (queueDetailPreviewUrl) URL.revokeObjectURL(queueDetailPreviewUrl);
   queueDetailPreviewUrl = null;
   queueDetailId = null;
@@ -211,11 +252,28 @@ function closeQueueDetail() {
 
 function openQueueDetail(entry) {
   closeQueueMenu();
-  if (!entry?.blob) return;
+  if (!entry) return;
   queueDetailId = entry.id;
-  queueDetailPreviewUrl = URL.createObjectURL(entry.blob);
-  $('queue-detail-image').src = queueDetailPreviewUrl;
-  $('queue-detail-image').alt = 'Lokal vorgemerkte Fotoaufnahme';
+  const image = $('queue-detail-image');
+  const unavailable = $('queue-detail-image-unavailable');
+  const candidates = [entry.blob, entry.thumbnail].filter(displayableBlob);
+  const showCandidate = (index) => {
+    if (queueDetailPreviewUrl) URL.revokeObjectURL(queueDetailPreviewUrl);
+    queueDetailPreviewUrl = null;
+    if (index >= candidates.length) {
+      image.removeAttribute('src');
+      image.hidden = true;
+      unavailable.hidden = false;
+      return;
+    }
+    queueDetailPreviewUrl = URL.createObjectURL(candidates[index]);
+    image.hidden = false;
+    unavailable.hidden = true;
+    image.onerror = () => showCandidate(index + 1);
+    image.src = queueDetailPreviewUrl;
+  };
+  image.alt = 'Lokal vorgemerkte Fotoaufnahme';
+  showCandidate(0);
   $('queue-detail-state').textContent = queueEntryLabel(entry);
   const task = entry.task;
   $('queue-detail-task').hidden = !task?.text;
@@ -250,8 +308,11 @@ function normalizedClientMetadata(entry) {
 
 async function prepareOutboxEntry(entry) {
   const patch = {};
-  if (!validUploadId(entry.uploadId)) {
-    patch.uploadId = validUploadId(entry.id) ? entry.id : crypto.randomUUID();
+  if (!validUploadId(entry.serverPhotoId)) {
+    // The IndexedDB key identifies only the local queue item. A separate UUID
+    // is allocated exactly once when the first real upload starts and then
+    // retained so interrupted requests stay idempotent.
+    patch.serverPhotoId = validUploadId(entry.uploadId) ? entry.uploadId : crypto.randomUUID();
   }
   const clientMetadata = normalizedClientMetadata(entry);
   if (JSON.stringify(entry.clientMetadata) !== JSON.stringify(clientMetadata)) patch.clientMetadata = clientMetadata;
@@ -343,7 +404,7 @@ async function removeQueueEntry(entryId) {
 }
 
 function renderQueue() {
-  releaseQueuePreviews();
+  releaseUnusedQueuePreviews();
   const control = $('queue-control');
   const badge = $('queue-badge');
   const button = $('queue-button');
@@ -416,14 +477,21 @@ function renderQueue() {
     thumbnailButton.setAttribute('aria-label', 'Vorgemerktes Foto groß anzeigen');
     const thumbnail = document.createElement('img');
     thumbnail.className = 'queue-thumbnail';
-    const preview = entry.thumbnail || entry.blob;
-    if (preview) {
-      const url = URL.createObjectURL(preview);
-      queuePreviewUrls.add(url);
-      thumbnail.src = url;
+    const placeholder = queueThumbnailPlaceholder();
+    const previewUrl = queuePreviewUrl(entry);
+    if (previewUrl) {
       thumbnail.alt = '';
+      thumbnail.addEventListener('load', () => { placeholder.hidden = true; }, { once: true });
+      thumbnail.addEventListener('error', () => {
+        thumbnail.hidden = true;
+        placeholder.hidden = false;
+        thumbnailButton.setAttribute('aria-label', 'Vorschau nicht verfügbar. Vorgemerktes Foto öffnen');
+      }, { once: true });
+      thumbnail.src = previewUrl;
+    } else {
+      thumbnail.hidden = true;
     }
-    thumbnailButton.append(thumbnail);
+    thumbnailButton.append(thumbnail, placeholder);
     thumbnailButton.addEventListener('click', () => openQueueDetail(entry));
     const detail = document.createElement('button');
     detail.type = 'button';
@@ -457,7 +525,10 @@ function renderQueue() {
     }
     if (entry.status === 'error' || entry.status === 'blocked') {
       actions.append(iconButton('Upload erneut versuchen', '↻', async () => {
-        await updateOutboxEntry(entry.id, { status: 'queued', nextAttemptAt: 0, lastError: '', progress: 0 });
+        await updateOutboxEntry(entry.id, {
+          status: 'queued', nextAttemptAt: 0, lastError: '', progress: 0,
+          serverPhotoId: null, uploadId: null,
+        });
         await refreshOutbox();
         scheduleQueueSync();
       }));
@@ -480,14 +551,10 @@ function renderQueue() {
 async function repairLegacyOutbox(entries) {
   let requeued = false;
   for (const entry of entries) {
-    const repaired = await prepareOutboxEntry(entry);
-    if (
-      repaired.uploadId !== entry.uploadId
-      && entry.status === 'error'
-      && entry.lastError?.includes('Ungültige Foto-ID')
-    ) {
+    if (entry.status === 'error' && /Ungültige Foto-ID|Bitte genau ein Foto/i.test(entry.lastError || '')) {
       await updateOutboxEntry(entry.id, {
         status: 'queued', attempts: 0, nextAttemptAt: 0, lastError: '', progress: 0,
+        serverPhotoId: null, uploadId: null,
       });
       requeued = true;
     }
@@ -543,11 +610,19 @@ async function syncOutbox() {
   try {
     for (let entry of await listOutbox()) {
       if (entry.status !== 'queued' || (entry.nextAttemptAt || 0) > Date.now()) continue;
+      if (!displayableBlob(entry.blob)) {
+        await updateOutboxEntry(entry.id, {
+          status: 'error', progress: 0,
+          lastError: 'Das lokal gespeicherte Foto fehlt. Bitte aus der Liste löschen.',
+        });
+        await refreshOutbox();
+        continue;
+      }
       entry = await prepareOutboxEntry(entry);
       await updateOutboxEntry(entry.id, { status: 'uploading', progress: 0 });
       await refreshOutbox();
       try {
-        const result = await sendPhoto(entry.blob, entry.uploadId, entry.task, entry.clientMetadata, async (progress) => {
+        const result = await sendPhoto(entry.blob, entry.serverPhotoId, entry.task, entry.clientMetadata, async (progress) => {
           await updateOutboxEntry(entry.id, { progress });
           await refreshOutbox();
         });
@@ -612,8 +687,7 @@ async function queueSelectedPhoto() {
   await ensureOutboxCapacity(selected);
   const thumbnail = await queueThumbnail();
   const entry = {
-    id: uploadId,
-    uploadId,
+    id: crypto.randomUUID(),
     blob: selected,
     thumbnail,
     name: selected.name,
@@ -1479,7 +1553,7 @@ async function captureCameraPhoto() {
 function clearSelection() {
   previewGeneration++;
   selected = null;
-  uploadId = null;
+  directServerPhotoId = null;
   selectedTask = null;
   selectedUploadMetadata = null;
   if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -1543,7 +1617,6 @@ async function selectPhoto(file, source = 'library', mirrored = false) {
   if (!file.size) { $('upload-error').textContent = 'Die Datei ist leer. Bitte ein anderes Foto wählen.'; return; }
   selected = file;
   previewMirrored = mirrored;
-  uploadId = crypto.randomUUID();
   selectedTask = currentTask ? { id: currentTask.id, text: currentTask.text, task_token: currentTask.task_token } : null;
   selectedUploadMetadata = {
     source,
@@ -1656,7 +1729,8 @@ $('send').addEventListener('click', async () => {
       $('progress').value = 0;
       $('progress-text').textContent = 'Foto wird übertragen …';
       try {
-        const result = await sendPhoto(selected, uploadId, selectedTask, selectedUploadMetadata, (value) => {
+        directServerPhotoId ||= crypto.randomUUID();
+        const result = await sendPhoto(selected, directServerPhotoId, selectedTask, selectedUploadMetadata, (value) => {
           $('progress').value = value;
           $('progress-text').textContent = value < 100 ? `Foto wird übertragen: ${value} %` : 'Foto wird gespeichert …';
         });

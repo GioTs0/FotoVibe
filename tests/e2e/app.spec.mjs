@@ -142,7 +142,7 @@ test('an offline guest can inspect and remove a queued photo', async ({ page, co
   await expect(page.locator('#queue-control')).toBeVisible();
 });
 
-test('a legacy queued record gets a valid upload ID before it is sent', async ({ page }, testInfo) => {
+test('an old failed queue entry gets a fresh server photo ID before upload', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises the IndexedDB migration once in Chromium.');
   await page.goto('/');
   await page.getByLabel('Party-Code').fill('1234');
@@ -162,7 +162,8 @@ test('a legacy queued record gets a valid upload ID before it is sent', async ({
       transaction.objectStore('outbox').put({
         id: 'old-local-photo-key', blob, name: 'legacy.jpg', type: 'image/jpeg', size: blob.size,
         createdAt: Date.now(), updatedAt: Date.now(), status: 'error', attempts: 1,
-        nextAttemptAt: 0, lastError: 'Ungültige Foto-ID.', progress: 0,
+        uploadId: 'old-local-photo-key', nextAttemptAt: 0,
+        lastError: 'Bitte genau ein Foto hochladen.', progress: 0,
       });
       transaction.oncomplete = resolve;
       transaction.onerror = () => reject(transaction.error);
@@ -173,6 +174,109 @@ test('a legacy queued record gets a valid upload ID before it is sent', async ({
   });
   await expect(page.locator('#queue-control')).toBeHidden({ timeout: 15_000 });
   await expect(page.locator('#local-cache')).toBeHidden();
+});
+
+test('a full offline queue of 25 task photos drains with its metadata intact', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises the maximum outbox size once in Chromium.');
+  await page.goto('/');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Volle Queue');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  await page.waitForFunction(() => navigator.serviceWorker?.controller);
+  const marker = await page.evaluate(async () => {
+    const task = (await fetch('/api/tasks').then((response) => response.json())).tasks[0];
+    const blob = await fetch('/static/party.jpg').then((response) => response.blob());
+    const marker = Date.now();
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('fotovibe-offline', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('outbox', 'readwrite');
+      const outbox = transaction.objectStore('outbox');
+      for (let index = 0; index < 25; index++) {
+        outbox.put({
+          id: `batch-${index}`,
+          blob,
+          name: `offline-${index}.jpg`,
+          type: 'image/jpeg',
+          size: blob.size,
+          task,
+          clientMetadata: {
+            source: 'camera',
+            captured_at: marker + index,
+            queued_at: marker + index,
+            task_id: task.id,
+          },
+          createdAt: marker + index,
+          updatedAt: marker + index,
+          status: 'queued',
+          attempts: 0,
+          nextAttemptAt: 0,
+          lastError: '',
+          progress: 0,
+        });
+      }
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    window.dispatchEvent(new Event('online'));
+    return marker;
+  });
+
+  await expect(page.locator('#queue-control')).toBeHidden({ timeout: 30_000 });
+  const uploaded = await page.evaluate(async (queuedAt) => {
+    const result = await fetch('/api/photos').then((response) => response.json());
+    return result.photos.filter((photo) => photo.metadata?.capture?.queued_at >= queuedAt);
+  }, marker);
+  expect(uploaded).toHaveLength(25);
+  expect(new Set(uploaded.map((photo) => photo.id)).size).toBe(25);
+  expect(uploaded.every((photo) => photo.metadata.task?.id && photo.metadata.capture?.source === 'camera')).toBe(true);
+});
+
+test('a broken local preview shows a calm placeholder and can still be removed', async ({ page, context }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises an unreadable local Blob once in Chromium.');
+  await page.goto('/');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Vorschau');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  await page.waitForFunction(() => navigator.serviceWorker?.controller);
+  await context.setOffline(true);
+  await page.evaluate(async () => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('fotovibe-offline', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('outbox', 'readwrite');
+      transaction.objectStore('outbox').put({
+        id: crypto.randomUUID(),
+        blob: new Blob(['kein-bild'], { type: 'image/jpeg' }),
+        name: 'nicht-lesbar.jpg', type: 'image/jpeg', size: 9,
+        createdAt: Date.now(), updatedAt: Date.now(), status: 'queued', attempts: 0,
+        nextAttemptAt: 0, lastError: '', progress: 0,
+      });
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    window.dispatchEvent(new Event('offline'));
+  });
+
+  await page.locator('#local-cache').click();
+  await expect(page.locator('.queue-thumbnail-placeholder')).toBeVisible();
+  await page.getByRole('button', { name: /Vorschau nicht verfügbar/ }).click();
+  await expect(page.locator('#queue-detail-image-unavailable')).toBeVisible();
+  await page.getByRole('button', { name: 'Foto aus der Queue löschen' }).click();
+  await page.getByRole('button', { name: 'Löschen', exact: true }).click();
+  await expect(page.locator('#queue-detail')).toBeHidden();
 });
 
 test('the front-camera preview mirrors only the preview and keeps the action focused', async ({ page, browserName }, testInfo) => {

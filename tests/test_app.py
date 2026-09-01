@@ -94,8 +94,18 @@ def login_device(client, device_id):
     return response
 
 
-def upload(client, data=None, photo_id=None, task_id=None, task_token=None, client_metadata=None):
-    fields = {"upload_id": photo_id or str(uuid.uuid4())}
+def upload(
+    client,
+    data=None,
+    photo_id=None,
+    task_id=None,
+    task_token=None,
+    client_metadata=None,
+    include_photo_id=True,
+):
+    fields = {}
+    if include_photo_id:
+        fields["upload_id"] = photo_id or str(uuid.uuid4())
     if task_id is not None:
         fields["task_id"] = task_id
     if task_token is not None:
@@ -515,6 +525,17 @@ def test_retry_is_idempotent_and_conflict_is_rejected(env):
     assert len(store.published()) == 1
 
 
+def test_upload_allocates_a_photo_id_when_the_client_does_not_send_one(env):
+    client, _, store = env
+    login(client)
+
+    response = upload(client, include_photo_id=False)
+
+    assert response.status_code == 201
+    assert str(uuid.UUID(response.json()["id"])) == response.json()["id"]
+    assert len(store.published()) == 1
+
+
 def test_partial_upload_hidden_and_retry_recovers(env, monkeypatch):
     client, _, store = env
     login(client)
@@ -670,6 +691,35 @@ def test_offline_upload_metadata_keeps_task_link_and_capture_snapshot(tmp_path):
     assert upload(client, task_token=task["task_token"], client_metadata=wrong_task).status_code == 400
 
 
+def test_full_offline_outbox_of_25_photos_drains_with_task_and_capture_metadata(tmp_path):
+    tasks = TestTaskStore([{"id": "abend", "text": "Mach ein Gruppenfoto."}])
+    store = LocalStore(tmp_path)
+    client = TestClient(
+        create_app(Settings("TEST-CODE", "test-signing-key"), store, tasks),
+        base_url="https://testserver",
+    )
+    login(client)
+    task = client.get("/api/tasks").json()["tasks"][0]
+
+    for index in range(25):
+        response = upload(
+            client,
+            photo_id=str(uuid.uuid4()),
+            task_token=task["task_token"],
+            client_metadata={
+                "source": "camera",
+                "captured_at": 1_700_000_000_000 + index,
+                "queued_at": 1_700_000_100_000 + index,
+                "task_id": task["id"],
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["metadata"]["task"] == {"id": "abend", "text": "Mach ein Gruppenfoto."}
+        assert response.json()["metadata"]["capture"]["source"] == "camera"
+
+    assert len(store.published()) == 25
+
+
 def test_task_snapshot_key_survives_party_code_rotation(tmp_path):
     tasks = TestTaskStore([{"id": "abend", "text": "Ein gemeinsames Foto."}])
     store = LocalStore(tmp_path)
@@ -823,7 +873,7 @@ def test_upload_id_cannot_be_reused_with_different_task(tmp_path):
     assert upload(client, raw, photo_id, "zweite").status_code == 409
 
 
-def test_legacy_offline_upload_key_is_stable_without_blocking_other_photos(env):
+def test_legacy_offline_upload_keys_map_to_retry_safe_photo_ids(env):
     client, _, store = env
     login(client)
     legacy_key = "old-indexeddb-entry"
@@ -832,7 +882,7 @@ def test_legacy_offline_upload_key_is_stable_without_blocking_other_photos(env):
 
     created = upload(client, first, legacy_key)
     repeated = upload(client, first, legacy_key)
-    another = upload(client, second, legacy_key)
+    another = upload(client, second, "another-indexeddb-entry")
 
     assert created.status_code == 201
     assert repeated.status_code == 200
@@ -871,7 +921,7 @@ def test_upload_rate_limit(env):
     client, _, _ = env
     login(client)
     photo_id = str(uuid.uuid4())
-    for _ in range(10):
+    for _ in range(30):
         assert upload(client, photo_id=photo_id).status_code in {200, 201}
     assert upload(client).status_code == 429
 
