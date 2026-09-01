@@ -27,9 +27,14 @@ let activeDetailPhoto = null;
 let galleryQuery = '';
 let gallerySearchTimer = null;
 let cameraStream = null;
-let cameraFacing = 'environment';
+const handheldPointer = typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches;
+// Phones start with the rear camera; laptops normally have one user-facing
+// webcam, so starting with `user` also enables its display-flash affordance.
+let cameraFacing = handheldPointer ? 'environment' : 'user';
 let cameraTorchOn = false;
 let cameraGeneration = 0;
+let captureFullscreenWanted = false;
 let selectionSource = null;
 let currentTask = null;
 let taskBusy = false;
@@ -63,15 +68,27 @@ let streamFrames = 0;
 let streamWindowStart = 0;
 let streamWarmUp = 0;
 let streamSlowWindows = 0;
+let streamFullscreenFallback = false;
 const streamReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 // /stream?tv=1 gives the television layout without the Fullscreen API, so a
 // browser started in kiosk mode needs no interaction at all.
 const tvMode = streamPage && new URLSearchParams(location.search).get('tv') === '1';
 document.body.classList.toggle('tv-mode', tvMode);
-$('page-backdrop').hidden = false;
+$('page-backdrop').hidden = tvMode;
 $(streamPage ? 'nav-stream' : galleryPage ? 'nav-gallery' : 'nav-upload').setAttribute('aria-current', 'page');
 document.title = galleryPage ? 'Unsere Galerie · 180. Geburtstag' : streamPage ? 'Stream · 180. Geburtstag' : 'Foto teilen · 180. Geburtstag';
+
+// Older iOS and embedded browsers calculate 100vh against browser chrome rather
+// than the currently visible area. Keep one pixel-accurate viewport value for
+// the camera, review and CSS fullscreen fallback.
+function syncViewportHeight() {
+  const height = window.visualViewport?.height || window.innerHeight;
+  if (height) document.documentElement.style.setProperty('--viewport-height', `${Math.round(height)}px`);
+}
+
+syncViewportHeight();
+window.visualViewport?.addEventListener('resize', syncViewportHeight);
 
 function deviceId() {
   if (cachedDeviceId) return cachedDeviceId;
@@ -257,6 +274,31 @@ async function hidePhotoFromGallery(photoId, button, messageTarget) {
   }
 }
 
+async function updateAdminRole(user, button, status) {
+  const desired = !user.is_admin;
+  if (!desired && !window.confirm(`Adminrechte für ${user.name} entziehen?`)) return;
+  button.disabled = true;
+  status.textContent = desired ? 'Adminrechte werden vergeben …' : 'Adminrechte werden entzogen …';
+  $('admin-error').textContent = '';
+  try {
+    const result = await api(`/api/admin/users/${encodeURIComponent(user.device_id)}/role`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_admin: desired }),
+    });
+    if (adminData?.users) {
+      adminData.users = adminData.users.map((entry) => entry.device_id === user.device_id
+        ? { ...entry, ...result.user, values: entry.values }
+        : entry);
+      renderAdminUsers(adminData);
+    }
+  } catch (error) {
+    $('admin-error').textContent = error.message;
+    status.textContent = 'Die Rolle konnte nicht geändert werden.';
+    button.disabled = false;
+  }
+}
+
 function normalizeAdminSearch(value) {
   return String(value || '')
     .normalize('NFD')
@@ -280,6 +322,7 @@ function renderAdminUsers(result) {
   summary.replaceChildren();
   summary.append(
     adminMetric('Gäste', visibleUsers.length),
+    adminMetric('Admins', visibleUsers.filter((user) => user.is_admin).length),
     adminMetric('Fotos', visibleUsers.reduce((total, user) => total + (user.photos?.length || 0), 0)),
   );
   summary.hidden = false;
@@ -322,6 +365,18 @@ function renderAdminUsers(result) {
 
     const content = document.createElement('div');
     content.className = 'admin-user-photos';
+    const roleActions = document.createElement('div');
+    roleActions.className = 'admin-role-actions';
+    const roleStatus = document.createElement('span');
+    roleStatus.className = 'admin-role-status';
+    roleStatus.textContent = user.is_admin ? 'Hat Adminrechte' : 'Gast';
+    const roleButton = document.createElement('button');
+    roleButton.type = 'button';
+    roleButton.className = 'secondary';
+    roleButton.textContent = user.is_admin ? 'Adminrechte entziehen' : 'Zum Admin machen';
+    roleButton.addEventListener('click', () => updateAdminRole(user, roleButton, roleStatus));
+    roleActions.append(roleStatus, roleButton);
+    content.append(roleActions);
     if (!user.photos?.length) {
       const empty = document.createElement('p');
       empty.className = 'admin-user-no-photos';
@@ -576,8 +631,9 @@ setupMovableTask('active-task', 'preview-task-restore', 'preview-task-hide');
 function setCaptureAccessibility(activeId = null) {
   const active = Boolean(activeId);
   document.querySelector('.topbar').inert = active;
+  $('main').inert = active;
   document.querySelector('footer').inert = active;
-  for (const child of $('upload').children) child.inert = active && child.id !== activeId;
+  $('capture-root').inert = !active;
 }
 
 function stopCamera(showPicker) {
@@ -586,8 +642,13 @@ function stopCamera(showPicker) {
   cameraStream = null;
   $('camera-video').srcObject = null;
   $('camera-view').hidden = true;
+  $('camera-view').classList.remove('screen-flash-on');
   document.body.classList.remove('camera-open');
   setCaptureAccessibility();
+  scheduleCaptureFullscreenExit();
+  cameraTorchOn = false;
+  $('camera-torch').setAttribute('aria-pressed', 'false');
+  $('camera-torch').setAttribute('aria-label', 'Blitz einschalten');
   $('shutter').disabled = true;
   $('switch-camera').hidden = true;
   $('camera-fallback').hidden = true;
@@ -657,6 +718,8 @@ async function openCamera(facing) {
   $('free-divider').hidden = true;
   $('challenge').hidden = !currentTask;
   $('camera-view').hidden = false;
+  $('camera-view').dataset.facing = facing;
+  enterCaptureFullscreen();
   syncTaskOverlay('camera-task', 'camera-task-text', 'camera-task-restore');
   $('camera-video').hidden = true;
   $('camera-status').textContent = 'Kamera wird geöffnet …';
@@ -684,12 +747,25 @@ async function openCamera(facing) {
     // switching is safe either way: facingMode is an ideal, so the worst case
     // is the same lens coming back.
     const track = stream.getVideoTracks()[0];
-    // Only a rear lens usually has a lamp, and only some browsers expose it.
+    const reportedFacing = track?.getSettings?.().facingMode;
+    const resolvedFacing = facing === 'user'
+      ? 'user'
+      : ['user', 'environment'].includes(reportedFacing)
+        ? reportedFacing
+        : facing;
+    $('camera-view').dataset.facing = resolvedFacing;
+    // The front camera always gets a display light. Rear-camera flash is only
+    // offered when the browser exposes a hardware torch.
     const torchCapable = Boolean(track?.getCapabilities?.().torch);
+    const screenFlashCapable = resolvedFacing === 'user';
     cameraTorchOn = false;
-    $('camera-torch').hidden = !torchCapable;
+    $('camera-view').classList.remove('screen-flash-on');
+    $('camera-torch').hidden = !screenFlashCapable && !torchCapable;
     $('camera-torch').setAttribute('aria-pressed', 'false');
-    const handheld = matchMedia('(pointer: coarse)').matches;
+    $('camera-torch').setAttribute('aria-label', screenFlashCapable
+      ? 'Display-Blitz einschalten'
+      : 'Blitz einschalten');
+    const handheld = handheldPointer;
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const cameras = devices.filter((device) => device.kind === 'videoinput').length;
@@ -728,11 +804,8 @@ async function captureCameraPhoto() {
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  if (cameraFacing === 'user') {
-    // Match the iPhone Camera default: saved front-camera photos are not mirrored.
-    context.translate(width, 0);
-    context.scale(-1, 1);
-  }
+  // The front-camera mirror is a viewfinder-only CSS transform. Drawing the
+  // raw stream keeps the saved photo unmirrored, matching native phone cameras.
   context.drawImage(video, 0, 0, width, height);
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.94));
   if (!blob) {
@@ -755,6 +828,7 @@ function clearSelection() {
   selectionSource = null;
   document.body.classList.remove('review-open');
   setCaptureAccessibility();
+  scheduleCaptureFullscreenExit();
   $('preview').removeAttribute('src');
   $('preview').hidden = $('review').hidden = $('success').hidden = $('progress-wrap').hidden = true;
   $('challenge').hidden = false;
@@ -770,6 +844,7 @@ function clearSelection() {
 }
 
 function showReviewShell() {
+  captureFullscreenWanted = true;
   document.body.classList.remove('camera-open');
   document.body.classList.add('review-open');
   setCaptureAccessibility('review');
@@ -1392,34 +1467,148 @@ async function loadStream() {
   }
 }
 
-$('stream-fullscreen').addEventListener('click', async () => {
-  try {
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
-  } catch { $('stream-error').textContent = 'Dieser Browser hat den Vollbildmodus abgelehnt.'; }
-});
-
 $('camera-torch').addEventListener('click', async () => {
   const track = cameraStream?.getVideoTracks()[0];
   if (!track) return;
   const wanted = !cameraTorchOn;
-  try {
-    await track.applyConstraints({ advanced: [{ torch: wanted }] });
+  const screenFlash = $('camera-view').dataset.facing === 'user';
+  if (screenFlash) {
     cameraTorchOn = wanted;
-  } catch {
-    cameraTorchOn = false;
-    $('camera-status').textContent = 'Das Licht lässt sich auf diesem Gerät nicht schalten.';
+    $('camera-view').classList.toggle('screen-flash-on', wanted);
+    $('camera-status').textContent = wanted
+      ? 'Display-Blitz eingeschaltet.'
+      : 'Display-Blitz ausgeschaltet.';
+  } else {
+    try {
+      await track.applyConstraints({ advanced: [{ torch: wanted }] });
+      cameraTorchOn = wanted;
+    } catch {
+      cameraTorchOn = false;
+      $('camera-status').textContent = 'Das Licht lässt sich auf diesem Gerät nicht schalten.';
+    }
   }
   $('camera-torch').setAttribute('aria-pressed', String(cameraTorchOn));
-  $('camera-torch').setAttribute('aria-label', cameraTorchOn ? 'Blitz ausschalten' : 'Blitz einschalten');
+  const label = screenFlash ? 'Display-Blitz' : 'Blitz';
+  $('camera-torch').setAttribute('aria-label', `${label} ${cameraTorchOn ? 'ausschalten' : 'einschalten'}`);
+});
+
+// Fullscreen is still fragmented on older WebKit and embedded TV browsers.
+// iPhone Safari does not offer element fullscreen at all, so every native path
+// has a viewport-sized CSS fallback that preserves the stream and its controls.
+let streamControlsTimer = null;
+
+function nativeFullscreenElement() {
+  return document.fullscreenElement
+    || document.webkitFullscreenElement
+    || document.mozFullScreenElement
+    || document.msFullscreenElement
+    || null;
+}
+
+function nativeFullscreenRequest(element) {
+  const request = element.requestFullscreen
+    || element.webkitRequestFullscreen
+    || element.webkitRequestFullScreen
+    || element.mozRequestFullScreen
+    || element.msRequestFullscreen;
+  if (!request) return Promise.resolve(false);
+  try {
+    return Promise.resolve(request.call(element))
+      .then(() => Boolean(nativeFullscreenElement()), () => false);
+  } catch {
+    return Promise.resolve(false);
+  }
+}
+
+function nativeFullscreenExit() {
+  const exit = document.exitFullscreen
+    || document.webkitExitFullscreen
+    || document.webkitCancelFullScreen
+    || document.mozCancelFullScreen
+    || document.msExitFullscreen;
+  if (!exit) return Promise.resolve();
+  try {
+    return Promise.resolve(exit.call(document)).catch(() => {});
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+function captureFlowActive() {
+  return document.body.classList.contains('camera-open')
+    || document.body.classList.contains('review-open');
+}
+
+function captureNativeFullscreenActive() {
+  return nativeFullscreenElement() === $('capture-root');
+}
+
+function enterCaptureFullscreen() {
+  captureFullscreenWanted = true;
+  syncViewportHeight();
+  if (nativeFullscreenElement()) return;
+  nativeFullscreenRequest($('capture-root')).then((entered) => {
+    if (entered && !captureFullscreenWanted) nativeFullscreenExit();
+  });
+}
+
+function scheduleCaptureFullscreenExit() {
+  Promise.resolve().then(() => {
+    // Camera -> preview and rear -> front camera both briefly close one view.
+    // Waiting one microtask keeps native fullscreen intact during that handoff.
+    if (captureFlowActive()) return;
+    captureFullscreenWanted = false;
+    if (captureNativeFullscreenActive()) nativeFullscreenExit();
+  });
+}
+
+function streamNativeFullscreenActive() {
+  return nativeFullscreenElement() === $('stream-stage');
+}
+
+function streamFullscreenActive() {
+  return streamNativeFullscreenActive() || streamFullscreenFallback;
+}
+
+function syncStreamFullscreen() {
+  const nativeActive = streamNativeFullscreenActive();
+  if (nativeActive) streamFullscreenFallback = false;
+  const active = nativeActive || streamFullscreenFallback;
+  document.body.classList.toggle('is-fullscreen', active);
+  $('stream-fullscreen').textContent = active ? 'Vollbild beenden' : 'Vollbild';
+  $('page-backdrop').hidden = active || tvMode;
+  syncViewportHeight();
+  requestAnimationFrame(syncViewportHeight);
+  if (active) revealStreamControls();
+  else {
+    clearTimeout(streamControlsTimer);
+    $('stream-stage').classList.remove('controls-visible');
+  }
+  if (streamPage) measureStreamStage();
+}
+
+async function enterStreamFullscreen() {
+  streamFullscreenFallback = false;
+  const enteredNatively = await nativeFullscreenRequest($('stream-stage'));
+  if (!enteredNatively && !streamNativeFullscreenActive()) streamFullscreenFallback = true;
+  syncStreamFullscreen();
+}
+
+async function exitStreamFullscreen() {
+  streamFullscreenFallback = false;
+  if (streamNativeFullscreenActive()) await nativeFullscreenExit();
+  syncStreamFullscreen();
+}
+
+$('stream-fullscreen').addEventListener('click', () => {
+  if (streamFullscreenActive()) exitStreamFullscreen();
+  else enterStreamFullscreen();
 });
 
 // In fullscreen there is no browser chrome and no Escape key on a phone, so a
 // tap brings back a way out for a few seconds.
-let streamControlsTimer = null;
-
 function revealStreamControls() {
-  if (!document.fullscreenElement) return;
+  if (!streamFullscreenActive()) return;
   clearTimeout(streamControlsTimer);
   $('stream-stage').classList.add('controls-visible');
   streamControlsTimer = setTimeout(
@@ -1427,27 +1616,32 @@ function revealStreamControls() {
 }
 
 $('stream-stage').addEventListener('pointerdown', revealStreamControls);
+$('stream-stage').addEventListener('touchstart', revealStreamControls, { passive: true });
+$('stream-stage').addEventListener('mousedown', revealStreamControls);
 $('stream-exit').addEventListener('click', (event) => {
   event.stopPropagation();
-  if (document.fullscreenElement) document.exitFullscreen();
+  exitStreamFullscreen();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && streamFullscreenFallback) exitStreamFullscreen();
 });
 
-document.addEventListener('fullscreenchange', () => {
-  $('stream-fullscreen').textContent = document.fullscreenElement ? 'Vollbild beenden' : 'Vollbild';
-  // Fullscreen covers the backdrop completely, so stop paying for its filter
-  // while the stream needs every frame it can get.
-  const inFullscreen = Boolean(document.fullscreenElement);
-  $('page-backdrop').hidden = inFullscreen;
-  // The layout is driven by a plain class as well as :fullscreen. The selector
-  // is well supported, but a television showing a half-laid-out page all
-  // evening is not a failure worth risking for one selector.
-  document.body.classList.toggle('is-fullscreen', inFullscreen);
-  document.body.classList.toggle('tv-mode', tvMode || inFullscreen);
-  if (inFullscreen) revealStreamControls();
-  else $('stream-stage').classList.remove('controls-visible');
-  if (streamPage) measureStreamStage();
-});
+function handleFullscreenChange() {
+  syncViewportHeight();
+  requestAnimationFrame(syncViewportHeight);
+  if (captureNativeFullscreenActive() && !captureFullscreenWanted) {
+    nativeFullscreenExit();
+    return;
+  }
+  syncStreamFullscreen();
+}
+
+for (const eventName of ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange']) {
+  document.addEventListener(eventName, handleFullscreenChange);
+}
+if (tvMode) syncStreamFullscreen();
 window.addEventListener('resize', () => {
+  syncViewportHeight();
   if (streamPage) measureStreamStage();
 });
 
@@ -1516,12 +1710,10 @@ async function loadGallery(more) {
       }
     } else if (!more && galleryLoaded && !photos.size) nextCursor = result.next_cursor;
     const fragment = document.createDocumentFragment();
-    let added = 0;
     for (const photo of batch) {
       if (photos.has(photo.id)) continue;
       photos.set(photo.id, photo);
       fragment.append(photoButton(photo));
-      added++;
     }
     if (more) $('photo-grid').append(fragment); else $('photo-grid').prepend(fragment);
     galleryLoaded = true;
@@ -1534,8 +1726,7 @@ async function loadGallery(more) {
       $('gallery-empty').querySelector('p').textContent = 'Mach den Anfang und teile ein Foto von der Party.';
     }
     $('load-more').hidden = !nextCursor;
-    $('gallery-status').textContent = photos.size ? `${photos.size} ${photos.size === 1 ? 'Foto' : 'Fotos'} geladen${added && !more ? ' · Gerade aktualisiert' : ''}. Neue Fotos erscheinen automatisch.` : 'Neue Fotos erscheinen hier automatisch.';
-  } catch (error) { $('gallery-error').textContent = error.message; $('gallery-status').textContent = 'Die Galerie konnte nicht aktualisiert werden.'; }
+  } catch (error) { $('gallery-error').textContent = error.message; }
   finally {
     galleryBusy = false;
     $('refresh').disabled = $('load-more').disabled = false;

@@ -54,6 +54,49 @@ einer Änderung startet er das lokale Backend neu; eine bereits geöffnete Seite
 lädt sich automatisch neu. Der direkte Aufruf bleibt ebenfalls möglich:
 `env -u UV_DEFAULT_INDEX uv run --frozen python scripts/dev.py --port 8081`.
 
+## Reproduzierbare Browser- und Gerätesimulation
+
+Die Browser-Tests sind ausschließlich Entwicklungswerkzeuge. Playwright steht in
+`devDependencies` und wird nicht in die ausgelieferte App eingebaut. Nach einem
+frischen Checkout reicht einmalig:
+
+```sh
+npm run setup:tests
+```
+
+Das Setup synchronisiert die Python-Umgebung aus `uv.lock`, installiert die
+Node-Abhängigkeiten reproduzierbar aus `package-lock.json`, baut den lokalen
+HEIC-Decoder und lädt die Playwright-Browser Chromium, Firefox und WebKit. Danach
+startet:
+
+```sh
+npm run test:e2e       # Desktop, Pixel-/Android-Viewport, iPhone-WebKit und TV-Größe
+npm run test:e2e:ui    # Interaktive Playwright-Oberfläche
+```
+
+Die Chromium-Profile verwenden dabei eine deterministische Fake-Webcam. So kann
+der Kameraablauf einschließlich des Desktop-Display-Blitz-Buttons ohne angeschlossene
+Kamera geprüft werden; die WebKit-/Firefox-Profile bleiben echte Browser-Layouttests.
+
+Alternativ stehen die Make-Ziele `make setup-tests`, `make test-e2e` und
+`make test-e2e-ui` zur Verfügung. Der lokale Server wird für die Tests automatisch
+gestartet und nach dem Testlauf beendet. Für eine bereits laufende oder deployte
+Umgebung kann `PLAYWRIGHT_BASE_URL=https://… npm run test:e2e` verwendet werden.
+
+Die Playwright-Profile prüfen Browser-Layout und Navigation, ersetzen aber keine
+echte Kamera-Hardware. Für native Simulatoren meldet das Setup den lokalen Status:
+
+- Auf macOS müssen Xcode und die gewünschten iOS-/tvOS-Runtimes einmalig über den
+  Mac App Store bzw. Xcode installiert werden.
+- Für Android-Handy und Android TV/Google TV müssen Android Studio, SDK,
+  Emulator und mindestens ein AVD einmalig eingerichtet werden.
+
+Diese Simulator-Runtimes sind große, hostabhängige Betriebssystem-Images und
+werden bewusst nicht als npm- oder App-Dependency gebündelt. Kamera, Display-
+Flash, Safari-Vollbild und gerätespezifische Browser-Eigenheiten sollten vor dem
+Release zusätzlich auf einem echten iPhone und dem vorgesehenen TV-Gerät geprüft
+werden.
+
 ## Deployment und erneutes Deployment
 
 ```sh
@@ -168,10 +211,17 @@ Eine private lokale Kopie neu erzeugter Secrets liegt in `.local/auth.json`
 
 ## Admins und ausgeblendete Fotos
 
-Die Admin-IDs stehen als `admin_device_ids` im Auth-Secret. Die App vergleicht
-sie mit der im Profil angezeigten Geräte-ID; die Werte sind keine Namen und
-werden serverseitig geprüft. Nach einer Änderung der Liste `make deploy`
-ausführen, damit Cloud Run eine neue Secret-Version verwendet.
+Die drei Ausgangs-Admins (`d_df9eabe35ce8`, `d_41b14e411f97` und
+`d_d63b34eb51bf`) stehen als
+`admin_device_ids` im Auth-Secret. Die App vergleicht sie mit der im Profil
+angezeigten Geräte-ID; die Werte sind keine Namen und werden serverseitig
+geprüft. Änderungen an dieser Startliste werden
+weiterhin mit `make deploy` ausgerollt. Zusätzlich können Admins im Panel Gäste
+zu Admins machen oder Adminrechte entziehen. Diese Änderungen werden als
+unveränderliche Rollenereignisse unter `admin_roles/<GERÄTE-HASH>/` gespeichert
+und gelten sofort, ohne dass dafür ein neues Deployment nötig ist. Die letzte
+Rollenentscheidung überschreibt die Startliste; die App verhindert, dass der
+letzte verbleibende Admin entfernt wird.
 
 Admins sehen im Profilmenü das Admin-Panel. Es zeigt registrierte Gäste,
 deren Nutzer- und Geräte-ID, Upload-Zähler sowie kleine Vorschaubilder ihrer
@@ -213,6 +263,7 @@ photos/<UUID>/thumb.jpg
 published/<UUID>.json
 users/<PARTY-GERÄTE-HASH>.json
 users/<PARTY-GERÄTE-HASH>/uploads/<FOTO-UUID>.json
+admin_roles/<PARTY-GERÄTE-HASH>/<EREIGNIS-UUID>.json
 ```
 
 Die Originaldatei hat einen SHA-256-Wert als Objektmetadatum. Alle Schreibvorgänge

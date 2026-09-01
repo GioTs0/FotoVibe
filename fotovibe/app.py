@@ -35,7 +35,7 @@ COOKIE = "fotovibe_session"
 TASK_ID_PATTERN = re.compile(r"[a-z0-9-]{1,100}")
 NAME_MAX_LENGTH = 40
 ADMIN_DEVICE_ID_PATTERN = re.compile(r"d_[a-f0-9]{12}")
-DEFAULT_ADMIN_DEVICE_IDS = ("d_df9eabe35ce8", "d_41b14e411f97")
+DEFAULT_ADMIN_DEVICE_IDS = ("d_df9eabe35ce8", "d_41b14e411f97", "d_d63b34eb51bf")
 REACTIONS = {
     "heart": "❤️",
     "laugh": "😂",
@@ -376,6 +376,49 @@ def create_app(settings=None, store=None, task_store=None):
     def user_reconciled_key(device):
         return f"users/{device}/reconciled-authors-v1.json"
 
+    def admin_role_prefix(device):
+        return f"admin_roles/{device}/"
+
+    def admin_role_states():
+        """Return the latest append-only role decision for each device.
+
+        The configured device IDs remain the initial admin allowlist. Role events
+        let the panel change that allowlist without requiring a Secret Manager
+        update on every click, and survive redeploys because they live in the
+        same immutable object store as the party data.
+        """
+        latest = {}
+        for obj in store.list_prefix("admin_roles/"):
+            match = re.fullmatch(r"admin_roles/([a-f0-9]{64})/([^/]+)\.json", obj.name)
+            if not match:
+                continue
+            try:
+                record = json.loads(store.read(obj.name) or b"")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(record, dict) or not isinstance(record.get("is_admin"), bool):
+                continue
+            device = match.group(1)
+            previous = latest.get(device)
+            if previous is None or (obj.created or "", obj.name) > previous[0]:
+                latest[device] = ((obj.created or "", obj.name), record["is_admin"])
+        return {device: value for device, (_, value) in latest.items()}
+
+    def is_admin(device, role_states=None):
+        role_states = admin_role_states() if role_states is None else role_states
+        return role_states.get(device, "d_" + device[:12] in settings.admin_device_ids)
+
+    def effective_admin_public_ids(role_states):
+        """Build the public IDs used for last-admin protection."""
+        public_ids = set(settings.admin_device_ids)
+        for device, enabled in role_states.items():
+            public_id = "d_" + device[:12]
+            if enabled:
+                public_ids.add(public_id)
+            else:
+                public_ids.discard(public_id)
+        return public_ids
+
     def normalized_name(value):
         if not isinstance(value, str):
             raise HTTPException(400, "Bitte gib deinen Namen ein.")
@@ -683,7 +726,7 @@ def create_app(settings=None, store=None, task_store=None):
                 "application/json",
             )
 
-    def user_profile(device):
+    def user_profile(device, role_states=None):
         user = user_for_device(device)
         if user is None:
             return None
@@ -693,16 +736,17 @@ def create_app(settings=None, store=None, task_store=None):
             **user,
             "device_id": "d_" + device[:12],
             "values": {"photos_uploaded": photos_uploaded},
-            "is_admin": "d_" + device[:12] in settings.admin_device_ids,
+            "is_admin": is_admin(device, role_states),
         }
 
     def require_admin(request):
         data = session_data(request)
-        if "d_" + data["device"][:12] not in settings.admin_device_ids:
+        if not is_admin(data["device"]):
             raise HTTPException(403, "Dieser Bereich ist nur für Admins.")
         return data
 
     def admin_overview():
+        role_states = admin_role_states()
         photos_by_author = {}
         for photo in gallery_entries(include_hidden=True):
             author = photo.get("author") or photo.get("metadata", {}).get("author")
@@ -722,7 +766,7 @@ def create_app(settings=None, store=None, task_store=None):
             device = suffix.removesuffix(".json")
             if not re.fullmatch(r"[a-f0-9]{64}", device):
                 continue
-            profile = user_profile(device)
+            profile = user_profile(device, role_states)
             if profile is None:
                 continue
             uploads = photos_by_author.get(profile["id"], [])
@@ -905,6 +949,62 @@ def create_app(settings=None, store=None, task_store=None):
     def admin_users(request: Request):
         require_admin(request)
         return admin_overview()
+
+    @app.patch("/api/admin/users/{device_id}/role")
+    async def admin_update_user_role(request: Request, device_id: str):
+        actor = require_admin(request)
+        if not ADMIN_DEVICE_ID_PATTERN.fullmatch(device_id):
+            raise HTTPException(400, "Die Geräte-ID ist ungültig.")
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(400, "Die neue Rolle ist ungültig.") from None
+        if not isinstance(payload, dict) or not isinstance(payload.get("is_admin"), bool):
+            raise HTTPException(400, "Die neue Rolle ist ungültig.")
+        desired = payload["is_admin"]
+
+        target_suffix = device_id.removeprefix("d_")
+        matches = []
+        for obj in store.list_prefix("users/"):
+            suffix = obj.name.removeprefix("users/")
+            if "/" in suffix or not suffix.endswith(".json"):
+                continue
+            device = suffix.removesuffix(".json")
+            if re.fullmatch(r"[a-f0-9]{64}", device) and device[:12] == target_suffix:
+                matches.append(device)
+        if not matches:
+            raise HTTPException(404, "Dieser Nutzer wurde nicht gefunden.")
+        if len(matches) > 1:
+            raise HTTPException(409, "Die Geräte-ID ist nicht eindeutig.")
+        target = matches[0]
+        role_states = admin_role_states()
+        current = is_admin(target, role_states)
+        if current == desired:
+            profile = user_profile(target, role_states)
+            return {"user": profile}
+        if target == actor["device"] and not desired:
+            raise HTTPException(400, "Du kannst dir selbst nicht die Adminrechte entziehen.")
+        if current and not desired:
+            public_ids = effective_admin_public_ids(role_states)
+            if len(public_ids) <= 1:
+                raise HTTPException(409, "Mindestens ein Admin muss erhalten bleiben.")
+
+        store.put(
+            f"{admin_role_prefix(target)}{uuid.uuid4()}.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "device": target,
+                    "is_admin": desired,
+                    "changed_by": "d_" + actor["device"][:12],
+                    "changed_at": datetime.now(UTC).isoformat(),
+                },
+                separators=(",", ":"),
+            ).encode(),
+            "application/json",
+        )
+        role_states = admin_role_states()
+        return {"user": user_profile(target, role_states)}
 
     @app.get("/api/admin/tasks")
     def admin_tasks(request: Request):

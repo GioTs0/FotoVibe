@@ -17,7 +17,7 @@ SERVICE = "fotovibe"
 BUCKET = "fotovibe-520703150508-photos"
 AUTH_SECRET = "fotovibe-auth"
 TEST_CODE = "1234"
-ADMIN_DEVICE_IDS = ("d_df9eabe35ce8", "d_41b14e411f97")
+ADMIN_DEVICE_IDS = ("d_df9eabe35ce8", "d_41b14e411f97", "d_d63b34eb51bf")
 FIRESTORE_DATABASE = "fotovibe"
 DNS_ZONE = "zone-180-foto-com"
 DOMAINS = ("180-foto.com", "www.180-foto.com")
@@ -367,6 +367,15 @@ def main():
             isinstance(device_id, str) for device_id in configured_admin_device_ids
         ):
             raise RuntimeError("Existing auth secret has invalid admin_device_ids")
+        else:
+            missing_admins = [
+                device_id
+                for device_id in ADMIN_DEVICE_IDS
+                if device_id not in configured_admin_device_ids
+            ]
+            if missing_admins:
+                values["admin_device_ids"] = [*configured_admin_device_ids, *missing_admins]
+                changed = True
         if changed:
             auth_path.write_text(json.dumps(values))
             auth_path.chmod(0o600)

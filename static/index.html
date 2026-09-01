@@ -98,54 +98,13 @@
         <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
         <input id="library-input" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" hidden>
       </div>
-      <section id="camera-view" class="capture-screen camera-view" hidden aria-labelledby="camera-title" aria-modal="true" role="dialog">
-        <h2 id="camera-title" class="sr-only">Kamera</h2>
-        <button id="camera-torch" class="capture-icon-button capture-torch" type="button" hidden aria-pressed="false" aria-label="Blitz einschalten"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.5 13H11l-1 9 8.5-11H12Z"/></svg></button>
-        <div id="camera-frame" class="camera-frame"><video id="camera-video" autoplay muted playsinline aria-label="Live-Vorschau der Kamera"></video></div>
-        <p id="camera-status" class="sr-only" role="status">Kamera wird geöffnet …</p>
-        <aside id="camera-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
-          <span class="capture-task-handle" aria-hidden="true">⠿</span>
-          <div><span>Foto-Aufgabe</span><p id="camera-task-text"></p></div>
-          <button id="camera-task-hide" class="capture-task-hide" type="button" aria-label="Aufgabe ausblenden">×</button>
-        </aside>
-        <button id="camera-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
-        <div class="capture-bottombar camera-controls">
-          <button id="close-camera" class="capture-icon-button" type="button" aria-label="Kamera schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
-          <button id="shutter" class="shutter" type="button" disabled aria-label="Foto aufnehmen"><span aria-hidden="true"></span></button>
-          <button id="switch-camera" class="capture-icon-button" type="button" hidden aria-label="Kamera wechseln"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-4V3"/><path d="M4 17h4v4"/><path d="M6.6 8.2A7 7 0 0 1 18.8 7M5.2 17A7 7 0 0 0 17.4 15.8"/></svg></button>
-          <button id="camera-fallback" class="capture-fallback" type="button" hidden>Gerätekamera öffnen</button>
-        </div>
-      </section>
-      <section id="review" class="capture-screen capture-review" hidden aria-labelledby="review-title" aria-modal="true" role="dialog">
-        <h2 id="review-title" class="sr-only">Foto prüfen</h2>
-        <img id="preview" alt="Vorschau deines ausgewählten Fotos" hidden>
-        <div class="capture-topbar review-topbar">
-          <button id="discard" class="capture-icon-button capture-back-button" type="button" aria-label="Zurück zur Kamera"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span id="discard-label">Zur Kamera</span></button>
-          <strong>Foto prüfen</strong>
-          <span class="capture-topbar-spacer" aria-hidden="true"></span>
-        </div>
-        <aside id="active-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
-          <span class="capture-task-handle" aria-hidden="true">⠿</span>
-          <div><span>Foto-Aufgabe</span><p id="active-task-text"></p></div>
-          <button id="preview-task-hide" class="capture-task-hide" type="button" aria-label="Aufgabe ausblenden">×</button>
-        </aside>
-        <button id="preview-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
-        <div class="review-bottombar">
-          <p id="file-info" class="capture-file-info"></p>
-          <p id="preview-status" role="status" class="capture-preview-status"></p>
-          <p id="upload-error" class="capture-error" role="alert"></p>
-          <div id="progress-wrap" hidden><progress id="progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress><p id="progress-text" role="status"></p></div>
-          <button id="send" class="capture-upload" type="button" disabled>Foto hochladen <span aria-hidden="true">↑</span></button>
-        </div>
-      </section>
       <div id="success" hidden role="status"><span class="success-mark" aria-hidden="true">✓</span><h2>Dein Moment ist dabei.</h2><p>Das Foto ist jetzt in unserer Galerie.</p><div class="actions"><button id="another" class="primary" type="button">Noch ein Foto teilen</button><a class="button secondary" href="/gallery">Zur Galerie</a></div></div>
     </section>
     <section id="gallery" class="gallery" hidden aria-labelledby="gallery-title">
       <div id="gallery-overview">
         <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><div class="gallery-actions"><a id="stream-link" class="button primary" href="/stream">Stream starten <span aria-hidden="true">▶</span></a><button id="refresh" class="secondary" type="button">Aktualisieren</button></div></div>
         <div class="gallery-toolbar">
-          <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen" aria-describedby="gallery-search-hint"><small id="gallery-search-hint">Findet auch ähnliche Schreibweisen.</small></label>
-          <p class="muted" id="gallery-status" role="status">Die Fotos werden geladen …</p>
+          <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen"></label>
         </div>
         <p id="gallery-error" class="error" role="alert"></p>
         <div id="gallery-empty" class="empty" hidden><h2>Der erste Moment fehlt noch.</h2><p>Mach den Anfang und teile ein Foto von der Party.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
@@ -198,9 +157,51 @@
         <button id="stream-exit" class="stream-exit" type="button">Vollbild beenden</button>
       </div>
       <div id="stream-empty" class="empty stream-empty" hidden><h2>Noch keine Fotos im Stream.</h2><p>Sobald die ersten Fotos da sind, laufen sie hier von allein durch.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
-      <p class="stream-hint">Der Stream läuft durchgehend und zeigt auf allen Geräten dasselbe Bild. Neue Fotos werden bevorzugt, alle übrigen laufen weiter im Wechsel.</p>
     </section>
   </main>
+  <div id="capture-root" class="capture-root" inert>
+    <section id="camera-view" class="capture-screen camera-view" hidden aria-labelledby="camera-title" aria-modal="true" role="dialog">
+      <h2 id="camera-title" class="sr-only">Kamera</h2>
+      <button id="camera-torch" class="capture-icon-button capture-torch" type="button" hidden aria-pressed="false" aria-label="Blitz einschalten"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.5 13H11l-1 9 8.5-11H12Z"/></svg></button>
+      <div id="camera-frame" class="camera-frame"><video id="camera-video" autoplay muted playsinline aria-label="Live-Vorschau der Kamera"></video></div>
+      <div class="screen-flash" aria-hidden="true"></div>
+      <p id="camera-status" class="sr-only" role="status">Kamera wird geöffnet …</p>
+      <aside id="camera-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
+        <span class="capture-task-handle" aria-hidden="true">⠿</span>
+        <div><span>Foto-Aufgabe</span><p id="camera-task-text"></p></div>
+        <button id="camera-task-hide" class="capture-task-hide" type="button" aria-label="Aufgabe ausblenden">×</button>
+      </aside>
+      <button id="camera-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
+      <div class="capture-bottombar camera-controls">
+        <button id="close-camera" class="capture-icon-button" type="button" aria-label="Kamera schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+        <button id="shutter" class="shutter" type="button" disabled aria-label="Foto aufnehmen"><span aria-hidden="true"></span></button>
+        <button id="switch-camera" class="capture-icon-button" type="button" hidden aria-label="Kamera wechseln"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-4V3"/><path d="M4 17h4v4"/><path d="M6.6 8.2A7 7 0 0 1 18.8 7M5.2 17A7 7 0 0 0 17.4 15.8"/></svg></button>
+        <button id="camera-fallback" class="capture-fallback" type="button" hidden>Gerätekamera öffnen</button>
+      </div>
+    </section>
+    <section id="review" class="capture-screen capture-review" hidden aria-labelledby="review-title" aria-modal="true" role="dialog">
+      <h2 id="review-title" class="sr-only">Foto prüfen</h2>
+      <img id="preview" alt="Vorschau deines ausgewählten Fotos" hidden>
+      <div class="capture-topbar review-topbar">
+        <button id="discard" class="capture-icon-button capture-back-button" type="button" aria-label="Zurück zur Kamera"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span id="discard-label">Zur Kamera</span></button>
+        <strong>Foto prüfen</strong>
+        <span class="capture-topbar-spacer" aria-hidden="true"></span>
+      </div>
+      <aside id="active-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
+        <span class="capture-task-handle" aria-hidden="true">⠿</span>
+        <div><span>Foto-Aufgabe</span><p id="active-task-text"></p></div>
+        <button id="preview-task-hide" class="capture-task-hide" type="button" aria-label="Aufgabe ausblenden">×</button>
+      </aside>
+      <button id="preview-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
+      <div class="review-bottombar">
+        <p id="file-info" class="capture-file-info"></p>
+        <p id="preview-status" role="status" class="capture-preview-status"></p>
+        <p id="upload-error" class="capture-error" role="alert"></p>
+        <div id="progress-wrap" hidden><progress id="progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress><p id="progress-text" role="status"></p></div>
+        <button id="send" class="capture-upload" type="button" disabled>Foto hochladen <span aria-hidden="true">↑</span></button>
+      </div>
+    </section>
+  </div>
   <footer><span>Gemeinsam aufgenommen. Gemeinsam erinnert.</span><button id="logout" type="button" class="text-button" hidden>Abmelden</button></footer>
   <noscript><p class="narrow error">Bitte JavaScript aktivieren, um Fotos anzusehen und zu teilen.</p></noscript>
 </body>

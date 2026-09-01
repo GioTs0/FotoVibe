@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim AS assets
 WORKDIR /assets
 COPY package.json package-lock.json .npmrc ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY scripts/vendor.mjs scripts/vendor.mjs
 RUN npm run build
 

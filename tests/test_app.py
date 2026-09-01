@@ -355,6 +355,35 @@ def test_admin_can_hide_photos_and_review_every_registered_user(tmp_path):
 
     assert guest.get("/api/admin/overview").status_code == 403
     assert guest.post(f"/api/admin/photos/{photo_id}/hide", headers=ORIGIN).status_code == 403
+    promoted = admin.patch(
+        f"/api/admin/users/{guest_user['device_id']}/role",
+        json={"is_admin": True},
+        headers=ORIGIN,
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["user"]["is_admin"] is True
+    assert guest.get("/api/admin/overview").status_code == 200
+    assert guest.patch(
+        f"/api/admin/users/{guest_user['device_id']}/role",
+        json={"is_admin": False},
+        headers=ORIGIN,
+    ).status_code == 400
+    demoted = admin.patch(
+        f"/api/admin/users/{guest_user['device_id']}/role",
+        json={"is_admin": False},
+        headers=ORIGIN,
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["user"]["is_admin"] is False
+    assert guest.get("/api/admin/overview").status_code == 403
+    role_events = store.list_prefix("admin_roles/")
+    assert len(role_events) == 2
+    assert all(event.name.endswith(".json") for event in role_events)
+    assert admin.patch(
+        f"/api/admin/users/{admin_user['device_id']}/role",
+        json={"is_admin": False},
+        headers=ORIGIN,
+    ).status_code == 400
     overview = admin.get("/api/admin/overview")
     assert overview.status_code == 200
     users = {user["id"]: user for user in overview.json()["users"]}

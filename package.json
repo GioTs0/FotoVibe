@@ -1,6 +1,16 @@
 {
   "name": "fotovibe-assets",
   "private": true,
-  "scripts": {"build": "node scripts/vendor.mjs"},
-  "dependencies": {"heic-to": "1.5.2"}
+  "scripts": {
+    "build": "node scripts/vendor.mjs",
+    "setup:tests": "node scripts/setup-tests.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "dependencies": {
+    "heic-to": "1.5.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
 }
