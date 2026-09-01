@@ -11,7 +11,7 @@
   <script src="/static/app.js" type="module"></script>
 </head>
 <body>
-  <div id="page-backdrop" class="page-backdrop" aria-hidden="true" hidden><div class="page-backdrop-wave"></div></div>
+  <div id="page-backdrop" class="page-backdrop" aria-hidden="true" hidden></div>
   <a class="skip" href="#main">Zum Inhalt</a>
   <header class="topbar">
     <a class="brand" href="/" aria-label="180. Geburtstag Startseite"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 6.5 8H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-2.5L16 5Z"/><circle cx="12" cy="14" r="4"/></svg>180. Geburtstag</a>
@@ -100,6 +100,7 @@
       </div>
       <section id="camera-view" class="capture-screen camera-view" hidden aria-labelledby="camera-title" aria-modal="true" role="dialog">
         <h2 id="camera-title" class="sr-only">Kamera</h2>
+        <button id="camera-torch" class="capture-icon-button capture-torch" type="button" hidden aria-pressed="false" aria-label="Blitz einschalten"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.5 13H11l-1 9 8.5-11H12Z"/></svg></button>
         <div id="camera-frame" class="camera-frame"><video id="camera-video" autoplay muted playsinline aria-label="Live-Vorschau der Kamera"></video></div>
         <p id="camera-status" class="sr-only" role="status">Kamera wird geöffnet …</p>
         <aside id="camera-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
@@ -192,6 +193,7 @@
       <div id="stream-error" class="error" role="alert"></div>
       <div id="stream-stage" class="stream-stage">
         <div id="stream-track" class="stream-track" aria-hidden="true"></div>
+        <button id="stream-exit" class="stream-exit" type="button">Vollbild beenden</button>
       </div>
       <div id="stream-empty" class="empty stream-empty" hidden><h2>Noch keine Fotos im Stream.</h2><p>Sobald die ersten Fotos da sind, laufen sie hier von allein durch.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
       <p class="stream-hint">Der Stream läuft durchgehend und zeigt auf allen Geräten dasselbe Bild. Neue Fotos werden bevorzugt, alle übrigen laufen weiter im Wechsel.</p>

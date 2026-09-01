@@ -28,6 +28,7 @@ let galleryQuery = '';
 let gallerySearchTimer = null;
 let cameraStream = null;
 let cameraFacing = 'environment';
+let cameraTorchOn = false;
 let cameraGeneration = 0;
 let selectionSource = null;
 let currentTask = null;
@@ -493,6 +494,7 @@ $('close-camera').addEventListener('click', () => {
 });
 $('switch-camera').addEventListener('click', () => {
   cameraFacing = cameraFacing === 'environment' ? 'user' : 'environment';
+  cameraTorchOn = false;
   openCamera(cameraFacing);
 });
 $('shutter').addEventListener('click', captureCameraPhoto);
@@ -675,6 +677,12 @@ async function openCamera(facing) {
     // it. A coarse pointer is taken as evidence of a handheld camera pair, and
     // switching is safe either way: facingMode is an ideal, so the worst case
     // is the same lens coming back.
+    const track = stream.getVideoTracks()[0];
+    // Only a rear lens usually has a lamp, and only some browsers expose it.
+    const torchCapable = Boolean(track?.getCapabilities?.().torch);
+    cameraTorchOn = false;
+    $('camera-torch').hidden = !torchCapable;
+    $('camera-torch').setAttribute('aria-pressed', 'false');
     const handheld = matchMedia('(pointer: coarse)').matches;
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -1375,11 +1383,46 @@ $('stream-fullscreen').addEventListener('click', async () => {
   } catch { $('stream-error').textContent = 'Dieser Browser hat den Vollbildmodus abgelehnt.'; }
 });
 
+$('camera-torch').addEventListener('click', async () => {
+  const track = cameraStream?.getVideoTracks()[0];
+  if (!track) return;
+  const wanted = !cameraTorchOn;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: wanted }] });
+    cameraTorchOn = wanted;
+  } catch {
+    cameraTorchOn = false;
+    $('camera-status').textContent = 'Das Licht lässt sich auf diesem Gerät nicht schalten.';
+  }
+  $('camera-torch').setAttribute('aria-pressed', String(cameraTorchOn));
+  $('camera-torch').setAttribute('aria-label', cameraTorchOn ? 'Blitz ausschalten' : 'Blitz einschalten');
+});
+
+// In fullscreen there is no browser chrome and no Escape key on a phone, so a
+// tap brings back a way out for a few seconds.
+let streamControlsTimer = null;
+
+function revealStreamControls() {
+  if (!document.fullscreenElement) return;
+  clearTimeout(streamControlsTimer);
+  $('stream-stage').classList.add('controls-visible');
+  streamControlsTimer = setTimeout(
+    () => $('stream-stage').classList.remove('controls-visible'), 3500);
+}
+
+$('stream-stage').addEventListener('pointerdown', revealStreamControls);
+$('stream-exit').addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (document.fullscreenElement) document.exitFullscreen();
+});
+
 document.addEventListener('fullscreenchange', () => {
   $('stream-fullscreen').textContent = document.fullscreenElement ? 'Vollbild beenden' : 'Vollbild';
   // Fullscreen covers the backdrop completely, so stop paying for its filter
   // while the stream needs every frame it can get.
   $('page-backdrop').hidden = Boolean(document.fullscreenElement);
+  if (document.fullscreenElement) revealStreamControls();
+  else $('stream-stage').classList.remove('controls-visible');
   if (streamPage) measureStreamStage();
 });
 window.addEventListener('resize', () => {
