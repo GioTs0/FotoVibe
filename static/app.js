@@ -28,6 +28,7 @@ let galleryQuery = '';
 let gallerySearchTimer = null;
 let cameraStream = null;
 let cameraFacing = 'environment';
+let cameraTorchOn = false;
 let cameraGeneration = 0;
 let selectionSource = null;
 let currentTask = null;
@@ -55,8 +56,19 @@ let streamClockOffset = 0;
 const streamSlots = [];
 const streamPhotoById = new Map();
 const streamStageSize = { width: 0, height: 0 };
+// The television at the party is an old one. Rather than guess its budget,
+// the stream watches its own frame rate and drops effects until it keeps up.
+let streamQuality = 0;
+let streamFrames = 0;
+let streamWindowStart = 0;
+let streamWarmUp = 0;
+let streamSlowWindows = 0;
 const streamReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
+// /stream?tv=1 gives the television layout without the Fullscreen API, so a
+// browser started in kiosk mode needs no interaction at all.
+const tvMode = streamPage && new URLSearchParams(location.search).get('tv') === '1';
+document.body.classList.toggle('tv-mode', tvMode);
 $('page-backdrop').hidden = false;
 $(streamPage ? 'nav-stream' : galleryPage ? 'nav-gallery' : 'nav-upload').setAttribute('aria-current', 'page');
 document.title = galleryPage ? 'Unsere Galerie · 180. Geburtstag' : streamPage ? 'Stream · 180. Geburtstag' : 'Foto teilen · 180. Geburtstag';
@@ -488,6 +500,7 @@ $('close-camera').addEventListener('click', () => {
 });
 $('switch-camera').addEventListener('click', () => {
   cameraFacing = cameraFacing === 'environment' ? 'user' : 'environment';
+  cameraTorchOn = false;
   openCamera(cameraFacing);
 });
 $('shutter').addEventListener('click', captureCameraPhoto);
@@ -665,10 +678,25 @@ async function openCamera(facing) {
     await $('camera-video').play();
     $('camera-status').textContent = 'Richte die Kamera aus und löse das Foto aus.';
     $('shutter').disabled = false;
+    // Phones routinely report a single video input even when they have a front
+    // and a rear lens, which hid this button on exactly the devices that need
+    // it. A coarse pointer is taken as evidence of a handheld camera pair, and
+    // switching is safe either way: facingMode is an ideal, so the worst case
+    // is the same lens coming back.
+    const track = stream.getVideoTracks()[0];
+    // Only a rear lens usually has a lamp, and only some browsers expose it.
+    const torchCapable = Boolean(track?.getCapabilities?.().torch);
+    cameraTorchOn = false;
+    $('camera-torch').hidden = !torchCapable;
+    $('camera-torch').setAttribute('aria-pressed', 'false');
+    const handheld = matchMedia('(pointer: coarse)').matches;
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
-      $('switch-camera').hidden = devices.filter((device) => device.kind === 'videoinput').length < 2;
-    } catch {}
+      const cameras = devices.filter((device) => device.kind === 'videoinput').length;
+      $('switch-camera').hidden = cameras < 2 && !handheld;
+    } catch {
+      $('switch-camera').hidden = !handheld;
+    }
     $('shutter').focus();
   } catch (error) {
     if (generation !== cameraGeneration) return;
@@ -1254,7 +1282,7 @@ function paintStream() {
     // its rasterised copy instead of re-blurring every frame.
     // On the whole card, not just the photo: the frame and its caption have to
     // recede with it, otherwise a distant photo sits in a razor-sharp frame.
-    const blur = Math.round((onScreen / scale) * 4) / 4;
+    const blur = streamQuality ? 0 : Math.round((onScreen / scale) * 4) / 4;
     if (slot.blur !== blur) {
       slot.node.style.filter = blur ? `blur(${blur}px)` : '';
       slot.blur = blur;
@@ -1262,7 +1290,37 @@ function paintStream() {
   }
 }
 
-function streamFrame() {
+function streamAdapt(now) {
+  if (!streamWindowStart) {
+    streamWindowStart = now;
+    return;
+  }
+  streamFrames += 1;
+  const elapsed = now - streamWindowStart;
+  if (elapsed < 2500) return;
+  const fps = (streamFrames * 1000) / elapsed;
+  streamWindowStart = now;
+  streamFrames = 0;
+  // The opening seconds decode thirteen photographs at once and the frame rate
+  // dips no matter how capable the machine is. Judging it then would leave a
+  // perfectly good laptop on the lowest setting for the rest of the evening.
+  if (streamWarmUp > 0) {
+    streamWarmUp -= 1;
+    return;
+  }
+  streamSlowWindows = fps < 40 ? streamSlowWindows + 1 : 0;
+  if (streamSlowWindows < 2 || streamQuality >= 2) return;
+  // Softening goes first, because it costs the most and is the least missed;
+  // only if that is not enough does the corridor get shorter.
+  streamSlowWindows = 0;
+  streamQuality += 1;
+  $('stream-stage').classList.toggle('is-lean', streamQuality >= 1);
+  $('stream-stage').classList.toggle('is-minimal', streamQuality >= 2);
+  for (const slot of streamSlots) slot.blur = null;
+}
+
+function streamFrame(now) {
+  streamAdapt(now);
   paintStream();
   streamFrameHandle = requestAnimationFrame(streamFrame);
 }
@@ -1270,6 +1328,7 @@ function streamFrame() {
 function startStreamMotion() {
   stopStreamMotion();
   if (!authenticated || !streamPage || document.hidden || !streamPlaylist.length) return;
+  if (!streamWindowStart) streamWarmUp = 3;
   if (streamReducedMotion.matches) {
     // One still picture at a time, refreshed as the camera passes each photo.
     paintStream();
@@ -1336,15 +1395,56 @@ async function loadStream() {
 $('stream-fullscreen').addEventListener('click', async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
-    else await $('stream-stage').requestFullscreen();
+    else await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
   } catch { $('stream-error').textContent = 'Dieser Browser hat den Vollbildmodus abgelehnt.'; }
+});
+
+$('camera-torch').addEventListener('click', async () => {
+  const track = cameraStream?.getVideoTracks()[0];
+  if (!track) return;
+  const wanted = !cameraTorchOn;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: wanted }] });
+    cameraTorchOn = wanted;
+  } catch {
+    cameraTorchOn = false;
+    $('camera-status').textContent = 'Das Licht lässt sich auf diesem Gerät nicht schalten.';
+  }
+  $('camera-torch').setAttribute('aria-pressed', String(cameraTorchOn));
+  $('camera-torch').setAttribute('aria-label', cameraTorchOn ? 'Blitz ausschalten' : 'Blitz einschalten');
+});
+
+// In fullscreen there is no browser chrome and no Escape key on a phone, so a
+// tap brings back a way out for a few seconds.
+let streamControlsTimer = null;
+
+function revealStreamControls() {
+  if (!document.fullscreenElement) return;
+  clearTimeout(streamControlsTimer);
+  $('stream-stage').classList.add('controls-visible');
+  streamControlsTimer = setTimeout(
+    () => $('stream-stage').classList.remove('controls-visible'), 3500);
+}
+
+$('stream-stage').addEventListener('pointerdown', revealStreamControls);
+$('stream-exit').addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (document.fullscreenElement) document.exitFullscreen();
 });
 
 document.addEventListener('fullscreenchange', () => {
   $('stream-fullscreen').textContent = document.fullscreenElement ? 'Vollbild beenden' : 'Vollbild';
   // Fullscreen covers the backdrop completely, so stop paying for its filter
   // while the stream needs every frame it can get.
-  $('page-backdrop').hidden = Boolean(document.fullscreenElement);
+  const inFullscreen = Boolean(document.fullscreenElement);
+  $('page-backdrop').hidden = inFullscreen;
+  // The layout is driven by a plain class as well as :fullscreen. The selector
+  // is well supported, but a television showing a half-laid-out page all
+  // evening is not a failure worth risking for one selector.
+  document.body.classList.toggle('is-fullscreen', inFullscreen);
+  document.body.classList.toggle('tv-mode', tvMode || inFullscreen);
+  if (inFullscreen) revealStreamControls();
+  else $('stream-stage').classList.remove('controls-visible');
   if (streamPage) measureStreamStage();
 });
 window.addEventListener('resize', () => {

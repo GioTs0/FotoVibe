@@ -100,6 +100,7 @@
       </div>
       <section id="camera-view" class="capture-screen camera-view" hidden aria-labelledby="camera-title" aria-modal="true" role="dialog">
         <h2 id="camera-title" class="sr-only">Kamera</h2>
+        <button id="camera-torch" class="capture-icon-button capture-torch" type="button" hidden aria-pressed="false" aria-label="Blitz einschalten"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.5 13H11l-1 9 8.5-11H12Z"/></svg></button>
         <div id="camera-frame" class="camera-frame"><video id="camera-video" autoplay muted playsinline aria-label="Live-Vorschau der Kamera"></video></div>
         <p id="camera-status" class="sr-only" role="status">Kamera wird geöffnet …</p>
         <aside id="camera-task" class="capture-task" hidden aria-label="Verschiebbare Foto-Aufgabe">
@@ -142,8 +143,10 @@
     <section id="gallery" class="gallery" hidden aria-labelledby="gallery-title">
       <div id="gallery-overview">
         <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><div class="gallery-actions"><a id="stream-link" class="button primary" href="/stream">Stream starten <span aria-hidden="true">▶</span></a><button id="refresh" class="secondary" type="button">Aktualisieren</button></div></div>
-        <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen" aria-describedby="gallery-search-hint"><small id="gallery-search-hint">Findet auch ähnliche Schreibweisen.</small></label>
-        <p class="muted" id="gallery-status" role="status">Die Fotos werden geladen …</p>
+        <div class="gallery-toolbar">
+          <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen" aria-describedby="gallery-search-hint"><small id="gallery-search-hint">Findet auch ähnliche Schreibweisen.</small></label>
+          <p class="muted" id="gallery-status" role="status">Die Fotos werden geladen …</p>
+        </div>
         <p id="gallery-error" class="error" role="alert"></p>
         <div id="gallery-empty" class="empty" hidden><h2>Der erste Moment fehlt noch.</h2><p>Mach den Anfang und teile ein Foto von der Party.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
         <div id="photo-grid" class="photo-grid"></div>
@@ -192,6 +195,7 @@
       <div id="stream-error" class="error" role="alert"></div>
       <div id="stream-stage" class="stream-stage">
         <div id="stream-track" class="stream-track" aria-hidden="true"></div>
+        <button id="stream-exit" class="stream-exit" type="button">Vollbild beenden</button>
       </div>
       <div id="stream-empty" class="empty stream-empty" hidden><h2>Noch keine Fotos im Stream.</h2><p>Sobald die ersten Fotos da sind, laufen sie hier von allein durch.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
       <p class="stream-hint">Der Stream läuft durchgehend und zeigt auf allen Geräten dasselbe Bild. Neue Fotos werden bevorzugt, alle übrigen laufen weiter im Wechsel.</p>
