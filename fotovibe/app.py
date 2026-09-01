@@ -3,9 +3,7 @@ import base64
 import hashlib
 import json
 import logging
-import math
 import os
-import random
 import re
 import secrets
 import threading
@@ -762,7 +760,7 @@ def create_app(settings=None, store=None, task_store=None):
 
     @app.get("/")
     @app.get("/gallery")
-    @app.get("/play")
+    @app.get("/stream")
     def page():
         if not settings.secure_cookies:
             html = (ROOT / "static/index.html").read_text()
@@ -1220,43 +1218,36 @@ def create_app(settings=None, store=None, task_store=None):
         )
         return {"photos": page, "next_cursor": next_cursor}
 
-    @app.get("/api/photos/play")
-    def play_photos(request: Request, count: int = 4, exclude: str | None = None):
-        """Return a weighted, duplicate-free spread for the party photo book."""
+    @app.get("/api/photos/stream")
+    def stream_photos(request: Request):
+        """Every visible photo, newest first, for the shared party stream.
+
+        The stream has no server-side state: each screen derives the currently
+        shown photo from the clock, so all of them stay on the same picture as
+        long as they share this list and agree on the time. The server clock is
+        returned with it, letting a screen correct its own drift.
+        """
         session(request)
-        if count < 1 or count > 6:
-            raise HTTPException(400, "Die Fotobuch-Größe muss zwischen 1 und 6 liegen.")
-        excluded = set()
-        if exclude:
-            values = [value for value in exclude.split(",") if value]
-            if len(values) > 24:
-                raise HTTPException(400, "Zu viele ausgeschlossene Fotos.")
-            for value in values:
-                excluded.add(valid_id(value))
         with cache_lock:
             if cache["until"] <= time.monotonic():
                 cache.update(photos=gallery_entries(), until=time.monotonic() + 5)
-            candidates = [photo for photo in cache["photos"] if photo["id"] not in excluded]
-        if not candidates:
-            return {"photos": []}
-
-        now = datetime.now(UTC)
-        selected = []
-        chooser = random.SystemRandom()
-        while candidates and len(selected) < count:
-            weights = []
-            for photo in candidates:
-                try:
-                    created = datetime.fromisoformat(photo["created_at"])
-                    age_hours = max(0.0, (now - created).total_seconds() / 3600)
-                except (TypeError, ValueError):
-                    age_hours = 24.0
-                # New uploads are more likely, while every photo retains a chance.
-                weights.append(1.0 + 4.0 * math.exp(-age_hours / 6.0))
-            picked = chooser.choices(candidates, weights=weights, k=1)[0]
-            selected.append(picked)
-            candidates.remove(picked)
-        return {"photos": selected}
+            entries = cache["photos"]
+        return {
+            "photos": [
+                {
+                    "id": entry["id"],
+                    "created_at": entry["created_at"],
+                    # Only what the caption under a photo needs. The screens poll
+                    # this list continuously, so it stays lean even late in a
+                    # party with several hundred photos.
+                    "task": (entry.get("task") or {}).get("text"),
+                    "author": (entry.get("author") or {}).get("name"),
+                    "reactions": (entry.get("interactions") or {}).get("reactions", []),
+                }
+                for entry in entries
+            ],
+            "now": datetime.now(UTC).isoformat(),
+        }
 
     @app.get("/api/photos/{photo_id}/{variant}")
     def photo(request: Request, photo_id: str, variant: str):

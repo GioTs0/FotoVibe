@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -576,8 +577,6 @@ def test_task_snapshot_is_stored_with_photo_and_listed(env):
     assert original_metadata["task_id"] == task["id"]
     assert original_metadata["task_text"] == task["text"]
     assert original_metadata["fotovibe_metadata"]
-    play_photo = client.get("/api/photos/play", params={"count": 1}).json()["photos"][0]
-    assert play_photo["task"] == task
 
 
 def test_gallery_exposes_photo_dimensions_for_format_aware_previews(env):
@@ -617,32 +616,34 @@ def test_gallery_reads_task_metadata_from_older_original_object(tmp_path):
     }
 
 
-def test_play_endpoint_requires_session_and_returns_unique_photos(env):
-    client, _, store = env
-    photo_ids = [str(uuid.uuid4()) for _ in range(5)]
-    for photo_id in photo_ids:
-        store.put(
-            f"published/{photo_id}.json",
-            json.dumps({"id": photo_id, "metadata": {}}).encode(),
-            "application/json",
-        )
+def test_stream_lists_photos_newest_first_with_caption_data(env):
+    client, _, _ = env
 
-    assert client.get("/api/photos/play").status_code == 401
+    assert client.get("/api/photos/stream").status_code == 401
     login(client)
-    result = client.get("/api/photos/play", params={"count": 4})
-    assert result.status_code == 200
-    selected = [photo["id"] for photo in result.json()["photos"]]
-    assert len(selected) == len(set(selected)) == 4
-    assert set(selected) <= set(photo_ids)
+    client.post("/api/users/me", json={"name": "Lea"}, headers=ORIGIN)
+    task = client.get("/api/tasks/random").json()
+    with_task = upload(client, picture(color="red"), task_id=task["id"]).json()["id"]
+    plain = upload(client, picture(color="blue")).json()["id"]
+    client.post(f"/api/photos/{with_task}/reactions", json={"emoji": "❤️"}, headers=ORIGIN)
 
-    excluded = client.get(
-        "/api/photos/play",
-        params={"count": 4, "exclude": ",".join(selected)},
-    )
-    assert excluded.status_code == 200
-    assert not {photo["id"] for photo in excluded.json()["photos"]} & set(selected)
-    assert client.get("/api/photos/play", params={"count": 7}).status_code == 400
-    assert client.get("/api/photos/play?exclude=../bad").status_code == 400
+    result = client.get("/api/photos/stream")
+    assert result.status_code == 200
+    payload = result.json()
+    listed = payload["photos"]
+    photos = {photo["id"]: photo for photo in listed}
+
+    # Every screen builds the same rotation from this list and captions each
+    # photo straight out of it, so order and caption data both have to be here.
+    assert set(photos) == {with_task, plain}
+    timestamps = [photo["created_at"] for photo in listed]
+    assert timestamps == sorted(timestamps, reverse=True)
+    assert photos[with_task]["task"] == task["text"]
+    assert photos[with_task]["author"] == "Lea"
+    assert photos[with_task]["reactions"] == [{"emoji": "❤️", "count": 1}]
+    assert photos[plain]["task"] is None
+    assert photos[plain]["reactions"] == []
+    assert datetime.fromisoformat(payload["now"]).tzinfo is not None
 
 
 def test_upload_rejects_unknown_task_without_publishing(env):

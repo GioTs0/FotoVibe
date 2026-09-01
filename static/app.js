@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const galleryPage = location.pathname === '/gallery';
-const playPage = location.pathname === '/play';
+const streamPage = location.pathname === '/stream';
 const MAX_BYTES = 25 * 1024 * 1024;
 const DEVICE_STORAGE_KEY = 'fotovibe_device_id';
 let cachedDeviceId = null;
@@ -32,14 +32,34 @@ let cameraGeneration = 0;
 let selectionSource = null;
 let currentTask = null;
 let taskBusy = false;
-let playTimer = null;
-let playBusy = false;
-let playPlaying = new URLSearchParams(location.search).get('autoplay') === '1';
-let playPageNumber = 0;
-const playRecent = [];
+// The stream keeps no server state: every screen derives what it shows from the
+// clock, which is what keeps the television and the phones together.
+const STREAM_SPACING = 340; // distance in depth between two photos
+const STREAM_SPEED = 46; // pixels per second the camera glides forward
+const STREAM_VISIBLE = 12; // photos in flight at any one moment
+const STREAM_FRESH = 8; // newest photos that get the extra turn
+const STREAM_PERSPECTIVE = 1200; // has to match the perspective on .stream-stage
+const STREAM_SPREAD_X = 52; // widest scatter on screen, percent of the stage width
+const STREAM_SPREAD_Y = 46; // widest scatter on screen, percent of the stage height
+const STREAM_CONVERGE_MIN = 0.18; // scatter kept at the very front, so nothing snaps
+const STREAM_FADE_OUT = 0.18; // fraction of one spacing a passing photo fades over
+const STREAM_BLUR_MAX = 2.4; // strongest background blur, measured on screen
+const STREAM_BLUR_RATE = 0.75; // screen blur gained per spacing of depth
+const STREAM_GOLDEN_ANGLE = 2.399963229728653; // 137.5 degrees, in radians
+let streamTimer = null;
+let streamFrameHandle = null;
+let streamPollTimer = null;
+let streamPlaylist = [];
+let streamSignature = null;
+let streamClockOffset = 0;
+const streamSlots = [];
+const streamPhotoById = new Map();
+const streamStageSize = { width: 0, height: 0 };
+const streamReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-$(galleryPage || playPage ? 'nav-gallery' : 'nav-upload').setAttribute('aria-current', 'page');
-document.title = galleryPage ? 'Unsere Galerie · 180. Geburtstag' : playPage ? 'Fotobuch · 180. Geburtstag' : 'Foto teilen · 180. Geburtstag';
+$('page-backdrop').hidden = false;
+$(streamPage ? 'nav-stream' : galleryPage ? 'nav-gallery' : 'nav-upload').setAttribute('aria-current', 'page');
+document.title = galleryPage ? 'Unsere Galerie · 180. Geburtstag' : streamPage ? 'Stream · 180. Geburtstag' : 'Foto teilen · 180. Geburtstag';
 
 function deviceId() {
   if (cachedDeviceId) return cachedDeviceId;
@@ -77,14 +97,13 @@ function showLogin(message = '') {
   stopCamera(false);
   document.body.classList.remove('review-open');
   $('review').hidden = true;
-  clearTimeout(playTimer);
-  playPlaying = false;
+  stopStream();
   authenticated = false;
   showUser(null);
   closeProfileMenu();
   clearTimeout(timer);
   $('login').hidden = false;
-  $('profile-setup').hidden = $('upload').hidden = $('gallery').hidden = $('play').hidden = $('admin').hidden = $('logout').hidden = $('boot').hidden = true;
+  $('profile-setup').hidden = $('upload').hidden = $('gallery').hidden = $('stream').hidden = $('admin').hidden = $('logout').hidden = $('boot').hidden = true;
   $('login-error').textContent = message;
   $('party-code').focus();
 }
@@ -107,7 +126,7 @@ async function enter(user) {
   $('boot').hidden = $('login').hidden = $('profile-setup').hidden = true;
   showUser(user);
   if (!currentUser) {
-    $('upload').hidden = $('gallery').hidden = $('play').hidden = $('logout').hidden = true;
+    $('upload').hidden = $('gallery').hidden = $('stream').hidden = $('logout').hidden = true;
     $('profile-setup').hidden = false;
     $('profile-input').focus();
     return false;
@@ -115,10 +134,10 @@ async function enter(user) {
   $('logout').hidden = false;
   $('admin').hidden = true;
   $('party-code').value = '';
-  $(galleryPage ? 'gallery' : playPage ? 'play' : 'upload').hidden = false;
-  if (!galleryPage && !playPage && selected) showReviewShell();
+  $(galleryPage ? 'gallery' : streamPage ? 'stream' : 'upload').hidden = false;
+  if (!galleryPage && !streamPage && selected) showReviewShell();
   if (galleryPage) await loadGallery(false);
-  if (playPage) await loadPlay();
+  if (streamPage) await loadStream();
   return true;
 }
 
@@ -129,7 +148,7 @@ $('login-form').addEventListener('submit', async (event) => {
   $('login-submit').textContent = 'Einen Moment …';
   try {
     const result = await api('/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: $('party-code').value, device_id: deviceId() }) });
-    if (await enter(result.user)) $(galleryPage ? 'refresh' : playPage ? 'play-toggle' : 'camera').focus();
+    if (await enter(result.user)) $(galleryPage ? 'refresh' : streamPage ? 'stream-fullscreen' : 'camera').focus();
   } catch (error) { $('login-error').textContent = error.message; }
   finally { $('login-submit').disabled = false; $('login-submit').textContent = 'Dabei sein →'; }
 });
@@ -164,7 +183,7 @@ $('profile-form').addEventListener('submit', async (event) => {
   try {
     const result = await api('/api/users/me', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: $('profile-input').value }) });
     await enter(result.user);
-    $(galleryPage ? 'refresh' : playPage ? 'play-toggle' : 'camera').focus();
+    $(galleryPage ? 'refresh' : streamPage ? 'stream-fullscreen' : 'camera').focus();
   } catch (error) { $('profile-error').textContent = error.message; }
   finally { $('profile-submit').disabled = false; $('profile-submit').innerHTML = 'Weiter zur Party <span aria-hidden="true">→</span>'; }
 });
@@ -196,7 +215,7 @@ $('task-add-form').addEventListener('submit', async (event) => {
 });
 
 function adminReturnPage() {
-  return galleryPage ? 'gallery' : playPage ? 'play' : 'upload';
+  return galleryPage ? 'gallery' : streamPage ? 'stream' : 'upload';
 }
 
 function adminMetric(label, value) {
@@ -440,7 +459,8 @@ $('admin-task-create-form').addEventListener('submit', async (event) => {
 
 $('admin-open').addEventListener('click', async () => {
   closeProfileMenu();
-  $('upload').hidden = $('gallery').hidden = $('play').hidden = true;
+  $('upload').hidden = $('gallery').hidden = $('stream').hidden = true;
+  stopStream();
   $('admin').hidden = false;
   await setAdminTab(adminTab);
   if (adminTab === 'users') await loadAdmin();
@@ -450,7 +470,7 @@ $('admin-back').addEventListener('click', async () => {
   $('admin').hidden = true;
   $(adminReturnPage()).hidden = false;
   if (galleryPage) await loadGallery(false);
-  if (playPage) await loadPlay();
+  if (streamPage) await loadStream();
   $('profile-button').focus();
 });
 
@@ -1072,98 +1092,264 @@ function photoButton(photo) {
   return button;
 }
 
-function playTask(photo) {
-  const task = photo?.task || photo?.metadata?.task;
-  return task && typeof task.text === 'string' ? task.text : '';
+function streamPlaylistFrom(list) {
+  if (!list.length) return [];
+  // The server sends newest first. Alternating the freshest photos with a walk
+  // through the whole list gives new uploads a visible head start while every
+  // photo keeps coming back around.
+  const fresh = list.slice(0, Math.min(STREAM_FRESH, list.length));
+  const playlist = [];
+  for (let i = 0; i < Math.max(list.length, fresh.length); i += 1) {
+    playlist.push(fresh[i % fresh.length]);
+    playlist.push(list[i % list.length]);
+  }
+  // The same picture twice in a row reads as a frozen screen.
+  return playlist.filter((photo, index) => index === 0 || photo.id !== playlist[index - 1].id);
 }
 
-function renderBookPhoto(figure, photo) {
-  const image = figure.querySelector('img');
-  const caption = figure.querySelector('figcaption');
-  if (!photo) {
-    figure.hidden = true;
-    figure.classList.remove('has-task');
-    image.removeAttribute('src');
+// Photos sit on a fixed grid in depth and the camera glides forward along it,
+// so a photo's position is a plain function of the clock. That is what keeps
+// the television and every phone showing the same thing.
+function streamCameraZ() {
+  return ((Date.now() + streamClockOffset) / 1000) * STREAM_SPEED;
+}
+
+function streamPlacement(index) {
+  // A golden-angle spiral instead of a pseudo-random scatter: successive photos
+  // land a third of a turn apart, so none of them ends up hidden straight
+  // behind its neighbour. The angle is folded into one turn first, which keeps
+  // the trigonometry well conditioned for the very large indices the clock
+  // produces. Everything derives from the index alone, so every screen places
+  // the photos identically.
+  // The radius must not be driven by the golden ratio as well: it correlates
+  // with the golden angle and leaves the corners of the stage empty, so it uses
+  // a different irrational. Keeping it well away from zero turns the field into
+  // a ring: the far photos sweep around the edges of the screen and leave the
+  // middle to whichever photo is currently arriving.
+  const angle = (index * STREAM_GOLDEN_ANGLE) % (Math.PI * 2);
+  const radius = 0.6 + 0.4 * ((index * 0.4142135623730951) % 1);
+  return {
+    x: Math.cos(angle) * radius,
+    y: Math.sin(angle) * radius,
+    tilt: (((index * 0.7548776662466927) % 1) - 0.5) * 8,
+  };
+}
+
+function buildStreamSlots() {
+  const track = $('stream-track');
+  track.replaceChildren();
+  streamSlots.length = 0;
+  for (let i = 0; i <= STREAM_VISIBLE; i += 1) {
+    const figure = document.createElement('figure');
+    const image = document.createElement('img');
+    const caption = document.createElement('figcaption');
+    figure.className = 'stream-photo';
+    image.decoding = 'async';
     image.alt = '';
-    caption.textContent = '';
+    caption.className = 'stream-caption';
+    // A slot always keeps its place in the queue, so its stacking order is
+    // fixed. Stating it explicitly matters because a filtered element drops out
+    // of the 3D sorting and would otherwise paint in DOM order.
+    figure.style.zIndex = String(STREAM_VISIBLE + 1 - i);
+    figure.append(image, caption);
+    track.append(figure);
+    streamSlots.push({
+      node: figure, image, caption, photoId: null, index: null, blur: null, place: null,
+    });
+  }
+}
+
+function measureStreamStage() {
+  // Read once per resize rather than per frame: the scatter is expressed in
+  // stage widths, and touching layout inside the animation loop would stall it.
+  const stage = $('stream-stage');
+  streamStageSize.width = stage.clientWidth;
+  streamStageSize.height = stage.clientHeight;
+}
+
+function renderStreamCaption(slot, photo) {
+  if (!photo) {
+    slot.caption.replaceChildren();
     return;
   }
-  figure.hidden = false;
-  const date = new Date(photo.created_at).toLocaleString('de', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-  image.src = `/api/photos/${photo.id}/display`;
-  image.alt = `Partyfoto vom ${date}`;
-  const task = playTask(photo);
-  figure.classList.toggle('has-task', Boolean(task));
-  caption.textContent = task;
+  const parts = [];
+  if (photo.task) {
+    const task = document.createElement('span');
+    task.className = 'stream-task';
+    task.textContent = photo.task;
+    parts.push(task);
+  }
+  const meta = document.createElement('span');
+  meta.className = 'stream-meta';
+  if (photo.author) {
+    const author = document.createElement('span');
+    author.className = 'stream-author';
+    author.textContent = photo.author;
+    meta.append(author);
+  }
+  for (const reaction of photo.reactions || []) {
+    const badge = document.createElement('span');
+    badge.className = 'stream-reaction';
+    badge.textContent = `${reaction.emoji} ${reaction.count}`;
+    meta.append(badge);
+  }
+  if (meta.childElementCount) parts.push(meta);
+  slot.caption.replaceChildren(...parts);
 }
 
-function updatePlayButton() {
-  $('play-toggle').innerHTML = playPlaying ? '<span aria-hidden="true">Ⅱ</span> Pausieren' : '<span aria-hidden="true">▶</span> Abspielen';
-  $('play-toggle').setAttribute('aria-pressed', String(playPlaying));
-}
+function paintStream() {
+  if (!streamPlaylist.length || !streamSlots.length) return;
+  if (!streamStageSize.width) measureStreamStage();
+  const cameraZ = streamCameraZ();
+  // Ceil, not floor: this has to be the first photo the camera has not passed yet.
+  const front = Math.ceil(cameraZ / STREAM_SPACING);
+  const furthest = STREAM_SPACING * STREAM_VISIBLE;
+  for (let position = 0; position < streamSlots.length; position += 1) {
+    const slot = streamSlots[position];
+    // One slot trails the camera so a photo is still visible while it sweeps past.
+    const index = front - 1 + position;
+    const depth = index * STREAM_SPACING - cameraZ;
+    if (slot.index !== index) {
+      const photo = streamPlaylist[((index % streamPlaylist.length) + streamPlaylist.length) % streamPlaylist.length];
+      if (slot.photoId !== photo.id) {
+        slot.image.src = `/api/photos/${photo.id}/display`;
+        slot.photoId = photo.id;
+      }
+      renderStreamCaption(slot, streamPhotoById.get(photo.id) || photo);
+      slot.place = streamPlacement(index);
+      slot.node.style.setProperty('--tilt', `${slot.place.tilt}deg`);
+      slot.index = index;
+    }
+    // Fade in from the far end, fade out again while passing the camera, so
+    // nothing pops into or out of existence.
+    const arriving = Math.min(1, Math.max(0, (furthest - depth) / (STREAM_SPACING * 1.6)));
+    const leaving = depth >= 0 ? 1 : Math.max(0, 1 + depth / (STREAM_SPACING * STREAM_FADE_OUT));
+    const scale = STREAM_PERSPECTIVE / (STREAM_PERSPECTIVE + Math.max(0, depth));
 
-function schedulePlay() {
-  clearTimeout(playTimer);
-  if (authenticated && playPage && playPlaying && !document.hidden) {
-    playTimer = setTimeout(loadPlay, 9000);
+    // Perspective alone would do the opposite of what is wanted here: it pulls
+    // distant photos towards the vanishing point and throws near ones outwards.
+    // So the scatter is aimed at the screen instead — widest at the back,
+    // collapsing onto the centre as a photo arrives — and then divided by the
+    // scale, which is exactly what the projection multiplies it by again.
+    // Smoothstep, not a power curve: an exponent below one has infinite slope
+    // at the near end, which is what made a photo appear to snap to the centre
+    // at the last moment. This eases in and out, and it never collapses all the
+    // way, so the last stretch of the journey stays gentle.
+    const towards = Math.min(1, Math.max(0, depth) / furthest);
+    const eased = towards * towards * (3 - 2 * towards);
+    const reach = STREAM_CONVERGE_MIN + (1 - STREAM_CONVERGE_MIN) * eased;
+    const shiftX = (slot.place.x * STREAM_SPREAD_X * streamStageSize.width * reach) / (100 * scale);
+    const shiftY = (slot.place.y * STREAM_SPREAD_Y * streamStageSize.height * reach) / (100 * scale);
+    slot.node.style.transform =
+      `translate3d(calc(-50% + ${shiftX.toFixed(1)}px), calc(-50% + ${shiftY.toFixed(1)}px), ${-depth}px)`
+      + ' rotate(var(--tilt, 0deg))';
+    slot.node.style.opacity = String(Math.min(arriving, leaving));
+    slot.node.classList.toggle('is-front', position === 1);
+
+    // Softening whatever is further back leaves the eye on the nearest photo.
+    // The blur is drawn before perspective shrinks the photo, so it is divided
+    // by the scale to keep the amount even once it reaches the screen.
+    const onScreen = Math.min(STREAM_BLUR_MAX, (Math.max(0, depth) / STREAM_SPACING) * STREAM_BLUR_RATE);
+    // Quantised, so the filter string rarely changes and the browser can keep
+    // its rasterised copy instead of re-blurring every frame.
+    // On the whole card, not just the photo: the frame and its caption have to
+    // recede with it, otherwise a distant photo sits in a razor-sharp frame.
+    const blur = Math.round((onScreen / scale) * 4) / 4;
+    if (slot.blur !== blur) {
+      slot.node.style.filter = blur ? `blur(${blur}px)` : '';
+      slot.blur = blur;
+    }
   }
 }
 
-async function loadPlay() {
-  if (playBusy || !authenticated || !playPage) return;
-  playBusy = true;
-  clearTimeout(playTimer);
-  $('play-next').disabled = $('play-toggle').disabled = true;
-  $('play-error').textContent = '';
-  $('play-status').textContent = 'Eine neue Seite wird aufgeschlagen …';
+function streamFrame() {
+  paintStream();
+  streamFrameHandle = requestAnimationFrame(streamFrame);
+}
+
+function startStreamMotion() {
+  stopStreamMotion();
+  if (!authenticated || !streamPage || document.hidden || !streamPlaylist.length) return;
+  if (streamReducedMotion.matches) {
+    // One still picture at a time, refreshed as the camera passes each photo.
+    paintStream();
+    streamTimer = setTimeout(startStreamMotion, STREAM_SPACING / STREAM_SPEED * 1000);
+    return;
+  }
+  streamFrameHandle = requestAnimationFrame(streamFrame);
+}
+
+function stopStreamMotion() {
+  if (streamFrameHandle !== null) cancelAnimationFrame(streamFrameHandle);
+  streamFrameHandle = null;
+  clearTimeout(streamTimer);
+  streamTimer = null;
+}
+
+function stopStream() {
+  stopStreamMotion();
+  clearTimeout(streamPollTimer);
+  streamPollTimer = null;
+}
+
+async function loadStream() {
+  if (!authenticated || !streamPage) return;
+  clearTimeout(streamPollTimer);
   try {
-    const query = new URLSearchParams({ count: '4' });
-    if (playRecent.length) query.set('exclude', playRecent.slice(-12).join(','));
-    let result = await api('/api/photos/play?' + query);
-    // A small party may contain fewer photos than the recent-repeat window.
-    if (!result.photos.length && playRecent.length) {
-      playRecent.length = 0;
-      result = await api('/api/photos/play?count=4');
+    const result = await api('/api/photos/stream');
+    const list = result.photos || [];
+    const serverNow = Date.parse(result.now);
+    // Correcting against the server clock is what keeps separate screens on the
+    // same picture; without it they drift apart by whatever their clocks differ.
+    if (Number.isFinite(serverNow)) streamClockOffset = serverNow - Date.now();
+    $('stream-error').textContent = '';
+    streamPhotoById.clear();
+    for (const photo of list) streamPhotoById.set(photo.id, photo);
+    const signature = list.map((photo) => photo.id).join(',');
+    // Reactions change far more often than the photo list. Rebuilding the
+    // rotation only when the list itself changes keeps the flow steady, while
+    // captions still pick up new reaction counts on the next poll.
+    if (signature !== streamSignature) {
+      streamSignature = signature;
+      streamPlaylist = streamPlaylistFrom(list);
+      if (!streamSlots.length) buildStreamSlots();
     }
-    const batch = result.photos || [];
-    if (!batch.length) {
-      $('book-spread').hidden = true;
-      $('play-empty').hidden = false;
-      $('play-status').textContent = 'Noch keine Fotos in der Galerie.';
-      return;
+    for (const slot of streamSlots) {
+      if (slot.photoId) renderStreamCaption(slot, streamPhotoById.get(slot.photoId));
     }
-    $('book-spread').hidden = false;
-    $('play-empty').hidden = true;
-    const figures = [...document.querySelectorAll('.book-photo[data-slot]')];
-    for (const figure of figures) renderBookPhoto(figure, batch[Number(figure.dataset.slot)]);
-    playRecent.push(...batch.map((photo) => photo.id));
-    while (playRecent.length > 20) playRecent.shift();
-    playPageNumber = (playPageNumber % 99) + 1;
-    $('book-page-number').textContent = String(playPageNumber).padStart(2, '0');
-    $('play-status').textContent = `${batch.length} ${batch.length === 1 ? 'Moment' : 'Momente'} auf dieser Seite · Neuere Fotos werden bevorzugt.`;
-    $('book-stage').classList.remove('is-turning');
-    void $('book-stage').offsetWidth;
-    $('book-stage').classList.add('is-turning');
+    $('stream-stage').hidden = !list.length;
+    $('stream-empty').hidden = Boolean(list.length);
+    // Measure only once the stage is on screen, otherwise it reports nothing.
+    if (list.length) measureStreamStage();
+    $('stream-status').textContent = list.length
+      ? `${list.length} ${list.length === 1 ? 'Foto' : 'Fotos'} im Stream · Neue Fotos werden bevorzugt gezeigt.`
+      : 'Noch keine Fotos in der Galerie.';
+    startStreamMotion();
   } catch (error) {
-    $('play-error').textContent = error.message;
-    $('play-status').textContent = 'Das Fotobuch konnte nicht aktualisiert werden.';
+    $('stream-error').textContent = error.message;
+    $('stream-status').textContent = 'Der Stream konnte nicht aktualisiert werden.';
   } finally {
-    playBusy = false;
-    $('play-next').disabled = $('play-toggle').disabled = false;
-    schedulePlay();
+    if (authenticated && streamPage) streamPollTimer = setTimeout(loadStream, 10000);
   }
 }
 
-$('play-toggle').addEventListener('click', () => {
-  playPlaying = !playPlaying;
-  updatePlayButton();
-  if (playPlaying) {
-    loadPlay();
-  } else {
-    clearTimeout(playTimer);
-  }
+$('stream-fullscreen').addEventListener('click', async () => {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await $('stream-stage').requestFullscreen();
+  } catch { $('stream-error').textContent = 'Dieser Browser hat den Vollbildmodus abgelehnt.'; }
 });
-$('play-next').addEventListener('click', loadPlay);
+
+document.addEventListener('fullscreenchange', () => {
+  $('stream-fullscreen').textContent = document.fullscreenElement ? 'Vollbild beenden' : 'Vollbild';
+  // Fullscreen covers the backdrop completely, so stop paying for its filter
+  // while the stream needs every frame it can get.
+  $('page-backdrop').hidden = Boolean(document.fullscreenElement);
+  if (streamPage) measureStreamStage();
+});
+window.addEventListener('resize', () => {
+  if (streamPage) measureStreamStage();
+});
 
 $('back-to-grid').addEventListener('click', () => {
   $('photo-detail').hidden = true;
@@ -1276,12 +1462,15 @@ $('gallery-search').addEventListener('input', () => {
 });
 document.addEventListener('visibilitychange', () => {
   clearTimeout(timer);
-  clearTimeout(playTimer);
   if (!document.hidden && galleryPage && authenticated) loadGallery(false);
-  if (!document.hidden && playPage && authenticated && playPlaying) loadPlay();
+  // Position comes from the clock, so a tab that was away simply rejoins the
+  // stream exactly where every other screen already is.
+  if (streamPage && authenticated) {
+    if (document.hidden) stopStreamMotion();
+    else startStreamMotion();
+  }
 });
 
-updatePlayButton();
 try {
   const activeSession = await api('/api/session');
   await enter(activeSession.user);
