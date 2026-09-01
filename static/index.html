@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" href="/static/icon-192.png">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js" type="module"></script>
+  <script src="/static/app.js?v=offline-upload-id-v4" type="module"></script>
 </head>
 <body>
   <div id="page-backdrop" class="page-backdrop" aria-hidden="true" hidden></div>
@@ -117,16 +117,19 @@
         <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
         <input id="library-input" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" hidden>
       </div>
-      <button id="local-cache" class="local-cache" type="button" disabled aria-controls="queue-menu" aria-label="Keine Fotos lokal vorgemerkt">
+      <button id="local-cache" class="local-cache" type="button" hidden disabled aria-controls="queue-menu" aria-label="Keine Fotos lokal vorgemerkt">
         <span aria-hidden="true">☁</span><span id="local-cache-text">0 / 25 vorgemerkt</span>
       </button>
       <div id="success" hidden><span class="success-mark" aria-hidden="true">✓</span><h2>Foto gespeichert.</h2><p id="success-status" class="upload-status" role="status"><span aria-hidden="true">↑</span> Wird geteilt</p><div class="actions"><button id="another" class="primary" type="button">Noch ein Foto teilen</button><a class="button secondary" href="/gallery">Zur Galerie</a></div></div>
     </section>
     <section id="gallery" class="gallery" hidden aria-labelledby="gallery-title">
       <div id="gallery-overview">
-        <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><div class="gallery-actions"><a id="stream-link" class="button primary" href="/stream">Stream starten <span aria-hidden="true">▶</span></a><button id="refresh" class="secondary" type="button">Aktualisieren</button></div></div>
-        <div class="gallery-toolbar">
-          <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen"></label>
+        <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><div class="gallery-actions"><button id="gallery-search-toggle" class="gallery-icon-button secondary" type="button" aria-expanded="false" aria-controls="gallery-toolbar" aria-label="Suche öffnen"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.2"></circle><path d="m16 16 4.3 4.3"></path></svg><span class="sr-only">Suche öffnen</span></button><button id="refresh" class="gallery-icon-button secondary" type="button" aria-label="Galerie aktualisieren"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-4.2L3 9"></path><path d="M3 4v5h5"></path><path d="M4 13a8 8 0 0 0 14.8 4.2L21 15"></path><path d="M21 20v-5h-5"></path></svg><span class="sr-only">Galerie aktualisieren</span></button></div></div>
+        <div id="gallery-toolbar" class="gallery-toolbar" hidden>
+          <div class="gallery-search-row">
+            <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen"></label>
+            <button id="gallery-mine-toggle" class="quick-filter secondary" type="button" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.1"></circle><path d="M5.5 19a6.5 6.5 0 0 1 13 0"></path></svg><span>Von mir</span></button>
+          </div>
         </div>
         <p id="gallery-error" class="error" role="alert"></p>
         <div id="gallery-empty" class="empty" hidden><h2>Der erste Moment fehlt noch.</h2><p>Mach den Anfang und teile ein Foto von der Party.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
@@ -223,6 +226,17 @@
     </section>
   </div>
   <p id="queue-notice" class="queue-notice" role="status" aria-live="polite" hidden></p>
+  <section id="queue-detail" class="queue-detail" role="dialog" aria-modal="true" aria-labelledby="queue-detail-title" hidden>
+    <div class="queue-detail-image-wrap">
+      <button id="queue-detail-close" class="capture-icon-button queue-detail-close" type="button" aria-label="Queue-Detail schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      <img id="queue-detail-image" alt="">
+    </div>
+    <div class="queue-detail-bottom">
+      <div class="queue-detail-info"><h2 id="queue-detail-title">Vorgemerktes Foto</h2><p id="queue-detail-state" class="queue-detail-state"></p><aside id="queue-detail-task" class="queue-detail-task" hidden><span>Foto-Aufgabe</span><p id="queue-detail-task-text"></p></aside><p id="queue-detail-error" class="queue-detail-error" hidden></p></div>
+      <button id="queue-detail-delete" class="queue-detail-delete" type="button" aria-label="Foto aus der Queue löschen" title="Foto löschen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg><span class="sr-only">Foto löschen</span></button>
+      <div id="queue-detail-delete-confirmation" class="queue-detail-confirmation" hidden><span>Wirklich löschen?</span><button id="queue-detail-delete-confirm" class="text-button" type="button">Löschen</button><button id="queue-detail-delete-cancel" class="text-button" type="button">Behalten</button></div>
+    </div>
+  </section>
   <footer><span>Gemeinsam aufgenommen. Gemeinsam erinnert.</span><button id="logout" type="button" class="text-button" hidden>Abmelden</button></footer>
   <noscript><p class="narrow error">Bitte JavaScript aktivieren, um Fotos anzusehen und zu teilen.</p></noscript>
 </body>

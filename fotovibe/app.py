@@ -477,6 +477,68 @@ def create_app(settings=None, store=None, task_store=None):
             raise HTTPException(400, "Ungültige Foto-ID.") from None
         return value
 
+    def upload_id(value, device, raw):
+        """Keep pre-PWA queue keys uploadable without weakening other ID routes."""
+        try:
+            return valid_id(value)
+        except HTTPException:
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 200
+                or not re.fullmatch(r"[A-Za-z0-9._:-]+", value)
+            ):
+                raise
+            # Old offline clients used their IndexedDB key as ``upload_id``.
+            # Deriving from the device, key and bytes preserves retry safety,
+            # while two photos that happen to share a bad key stay distinct.
+            fingerprint = hashlib.sha256(raw).hexdigest()
+            return str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"fotovibe-legacy-upload:{device}:{value}:{fingerprint}",
+                )
+            )
+
+    def capture_metadata(value):
+        """Accept the small, privacy-safe capture snapshot from the offline queue."""
+        if value is None:
+            return None
+        if not isinstance(value, str) or len(value) > 1000:
+            raise HTTPException(400, "Die Foto-Metadaten sind ungültig.")
+        try:
+            metadata = json.loads(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Die Foto-Metadaten sind ungültig.") from None
+        if not isinstance(metadata, dict) or set(metadata) - {
+            "source", "captured_at", "queued_at", "task_id"
+        }:
+            raise HTTPException(400, "Die Foto-Metadaten sind ungültig.")
+        source = metadata.get("source")
+        captured_at = metadata.get("captured_at")
+        queued_at = metadata.get("queued_at")
+        if (
+            source not in {"camera", "library", "fallback"}
+            or isinstance(captured_at, bool)
+            or not isinstance(captured_at, int)
+            or isinstance(queued_at, bool)
+            or not isinstance(queued_at, int)
+            or not 0 <= captured_at <= 9_007_199_254_740_991
+            or not 0 <= queued_at <= 9_007_199_254_740_991
+        ):
+            raise HTTPException(400, "Die Foto-Metadaten sind ungültig.")
+        task_id = metadata.get("task_id")
+        if task_id is not None and (
+            not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id)
+        ):
+            raise HTTPException(400, "Die Foto-Metadaten sind ungültig.")
+        return {
+            "source": source,
+            "captured_at": captured_at,
+            "queued_at": queued_at,
+            **({"task_id": task_id} if task_id is not None else {}),
+        }
+
     def task_snapshot(task):
         """Sign the wording shown to a guest for delayed, offline uploads."""
         return task_snapshots.dumps({"id": task["id"], "text": task["text"]})
@@ -1299,15 +1361,18 @@ def create_app(settings=None, store=None, task_store=None):
         data = session_data(request)
         sid = data["sid"]
         limiter.check("upload:" + sid, 10)
-        async with request.form(max_files=1, max_fields=2, max_part_size=8192) as form:
+        async with request.form(max_files=1, max_fields=3, max_part_size=8192) as form:
             photo = form.get("photo")
-            photo_id = valid_id(form.get("upload_id"))
+            queued_upload_id = form.get("upload_id")
             task_id = form.get("task_id")
             task_token = form.get("task_token")
+            client_metadata = form.get("client_metadata")
             expected_fields = {"photo", "upload_id"} | (
                 {"task_id"} if task_id is not None else set()
             ) | (
                 {"task_token"} if task_token is not None else set()
+            ) | (
+                {"client_metadata"} if client_metadata is not None else set()
             )
             if (
                 not isinstance(photo, UploadFile)
@@ -1316,12 +1381,19 @@ def create_app(settings=None, store=None, task_store=None):
             ):
                 raise HTTPException(400, "Bitte genau ein Foto auswählen.")
             task = await run_in_threadpool(resolve_task, task_id, task_token)
+            capture = capture_metadata(client_metadata)
+            capture_task_id = capture.pop("task_id", None) if capture else None
+            if capture_task_id is not None and (not task or capture_task_id != task["id"]):
+                raise HTTPException(400, "Die Foto-Aufgabe passt nicht zum Foto.")
             raw = await photo.read(MAX_BYTES + 1)
             if not raw:
                 raise HTTPException(400, "Die Datei ist leer.")
             if len(raw) > MAX_BYTES:
                 raise HTTPException(413, "Das Foto ist zu groß (maximal 25 MiB).")
+            photo_id = upload_id(queued_upload_id, data["device"], raw)
             photo_metadata = {"task": task} if task else {}
+            if capture:
+                photo_metadata["capture"] = capture
             author = user_for_device(data["device"])
             if author:
                 photo_metadata["author"] = author
@@ -1331,8 +1403,13 @@ def create_app(settings=None, store=None, task_store=None):
         return JSONResponse(record, status_code=201 if created else 200)
 
     @app.get("/api/photos")
-    def photos(request: Request, cursor: str | None = None, q: str | None = None):
-        session(request)
+    def photos(
+        request: Request,
+        cursor: str | None = None,
+        q: str | None = None,
+        mine: bool = False,
+    ):
+        data = session_data(request)
         if q is not None and (not isinstance(q, str) or len(q) > 100):
             raise HTTPException(400, "Die Suche ist zu lang.")
         after = None
@@ -1351,6 +1428,14 @@ def create_app(settings=None, store=None, task_store=None):
             if cache["until"] <= time.monotonic():
                 cache.update(photos=gallery_entries(), until=time.monotonic() + 5)
             entries = cache["photos"]
+        if mine:
+            user = user_for_device(data["device"])
+            user_id = user["id"] if user else None
+            entries = [
+                photo
+                for photo in entries
+                if user_id and (photo.get("author") or {}).get("id") == user_id
+            ]
         if q:
             entries = [
                 photo

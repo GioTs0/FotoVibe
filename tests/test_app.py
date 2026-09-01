@@ -94,12 +94,14 @@ def login_device(client, device_id):
     return response
 
 
-def upload(client, data=None, photo_id=None, task_id=None, task_token=None):
+def upload(client, data=None, photo_id=None, task_id=None, task_token=None, client_metadata=None):
     fields = {"upload_id": photo_id or str(uuid.uuid4())}
     if task_id is not None:
         fields["task_id"] = task_id
     if task_token is not None:
         fields["task_token"] = task_token
+    if client_metadata is not None:
+        fields["client_metadata"] = json.dumps(client_metadata)
     return client.post(
         "/api/photos",
         headers=ORIGIN,
@@ -212,6 +214,27 @@ def test_named_device_restores_session_and_authors_photos(env):
     assert restored.status_code == 200
     assert restored.json() == {"authenticated": True, "user": updated}
     assert client.get("/api/photos").status_code == 200
+
+
+def test_gallery_can_filter_photos_uploaded_by_current_user(env):
+    client, _, _ = env
+    first_device = str(uuid.uuid4())
+    second_device = str(uuid.uuid4())
+
+    login_device(client, first_device)
+    first_user = client.post("/api/users/me", json={"name": "Lea Sommer"}, headers=ORIGIN).json()["user"]
+    first_photo = upload(client).json()["id"]
+
+    login_device(client, second_device)
+    second_user = client.post("/api/users/me", json={"name": "Mara"}, headers=ORIGIN).json()["user"]
+    second_photo = upload(client).json()["id"]
+
+    all_photos = {photo["id"] for photo in client.get("/api/photos").json()["photos"]}
+    mine = {photo["id"] for photo in client.get("/api/photos?mine=1").json()["photos"]}
+
+    assert all_photos >= {first_photo, second_photo}
+    assert mine == {second_photo}
+    assert second_user["id"] != first_user["id"]
 
 
 def test_photo_reactions_comments_and_fuzzy_gallery_search(tmp_path):
@@ -616,6 +639,37 @@ def test_offline_task_tokens_keep_the_drawn_wording_after_task_changes(tmp_path)
     assert upload(client, task_id="damals", task_token=task["task_token"]).status_code == 400
 
 
+def test_offline_upload_metadata_keeps_task_link_and_capture_snapshot(tmp_path):
+    tasks = TestTaskStore([{"id": "abend", "text": "Mach ein Gruppenfoto."}])
+    store = LocalStore(tmp_path)
+    client = TestClient(
+        create_app(Settings("TEST-CODE", "test-signing-key"), store, tasks),
+        base_url="https://testserver",
+    )
+    login(client)
+    task = client.get("/api/tasks").json()["tasks"][0]
+    capture = {
+        "source": "camera",
+        "captured_at": 1_700_000_000_000,
+        "queued_at": 1_700_000_001_000,
+        "task_id": task["id"],
+    }
+
+    response = upload(client, task_token=task["task_token"], client_metadata=capture)
+
+    assert response.status_code == 201
+    assert response.json()["metadata"] == {
+        "task": {"id": "abend", "text": "Mach ein Gruppenfoto."},
+        "capture": {
+            "source": "camera",
+            "captured_at": 1_700_000_000_000,
+            "queued_at": 1_700_000_001_000,
+        },
+    }
+    wrong_task = {**capture, "task_id": "andere-aufgabe"}
+    assert upload(client, task_token=task["task_token"], client_metadata=wrong_task).status_code == 400
+
+
 def test_task_snapshot_key_survives_party_code_rotation(tmp_path):
     tasks = TestTaskStore([{"id": "abend", "text": "Ein gemeinsames Foto."}])
     store = LocalStore(tmp_path)
@@ -767,6 +821,25 @@ def test_upload_id_cannot_be_reused_with_different_task(tmp_path):
     assert upload(client, raw, photo_id, "erste").status_code == 201
     assert upload(client, raw, photo_id, "erste").status_code == 200
     assert upload(client, raw, photo_id, "zweite").status_code == 409
+
+
+def test_legacy_offline_upload_key_is_stable_without_blocking_other_photos(env):
+    client, _, store = env
+    login(client)
+    legacy_key = "old-indexeddb-entry"
+    first = picture()
+    second = picture(color="blue")
+
+    created = upload(client, first, legacy_key)
+    repeated = upload(client, first, legacy_key)
+    another = upload(client, second, legacy_key)
+
+    assert created.status_code == 201
+    assert repeated.status_code == 200
+    assert another.status_code == 201
+    assert created.json()["id"] != legacy_key
+    assert another.json()["id"] != created.json()["id"]
+    assert len(store.published()) == 2
 
 
 def test_concurrent_duplicate_uploads_across_instances(env):

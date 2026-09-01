@@ -1,9 +1,9 @@
-const CACHE = 'fotovibe-shell-v1';
+const CACHE = 'fotovibe-shell-v4';
 const SHELL = [
   '/',
   '/static/index.html',
   '/static/style.css',
-  '/static/app.js',
+  '/static/app.js?v=offline-upload-id-v4',
   '/static/offline-store.js',
   '/static/vendor/heic-to.js',
   '/static/party.jpg',
@@ -13,6 +13,7 @@ const SHELL = [
   '/manifest.webmanifest',
 ];
 const DATABASE = 'fotovibe-offline';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -149,10 +150,39 @@ function retryAfterMilliseconds(value) {
   return Number.isFinite(timestamp) && timestamp > Date.now() ? timestamp - Date.now() : 0;
 }
 
+function validUploadId(value) {
+  return typeof value === 'string' && UUID_PATTERN.test(value);
+}
+
+function finiteTimestamp(value, fallback) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+async function prepareEntry(entry) {
+  const patch = {};
+  if (!validUploadId(entry.uploadId)) {
+    patch.uploadId = validUploadId(entry.id) ? entry.id : crypto.randomUUID();
+  }
+  const stored = entry.clientMetadata || {};
+  const createdAt = finiteTimestamp(entry.createdAt, Date.now());
+  const metadata = {
+    source: ['camera', 'library', 'fallback'].includes(stored.source) ? stored.source : 'library',
+    captured_at: finiteTimestamp(stored.captured_at, createdAt),
+    queued_at: finiteTimestamp(stored.queued_at, createdAt),
+  };
+  if (entry.task?.id) metadata.task_id = entry.task.id;
+  if (JSON.stringify(entry.clientMetadata) !== JSON.stringify(metadata)) patch.clientMetadata = metadata;
+  if (!Object.keys(patch).length) return entry;
+  await updateEntry(entry.id, patch);
+  return { ...entry, ...patch };
+}
+
 async function uploadEntry(entry) {
   const form = new FormData();
-  form.append('upload_id', entry.id);
+  form.append('upload_id', entry.uploadId);
   if (entry.task?.task_token) form.append('task_token', entry.task.task_token);
+  else if (entry.task?.id) form.append('task_id', entry.task.id);
+  if (entry.clientMetadata) form.append('client_metadata', JSON.stringify(entry.clientMetadata));
   form.append('photo', entry.blob, entry.name || 'foto.jpg');
   const response = await fetch('/api/photos', { method: 'POST', body: form, credentials: 'same-origin' });
   if (response.ok) {
@@ -183,8 +213,9 @@ async function drainOutbox() {
   if (!(await acquireLease(owner))) return;
   const leaseRenewal = setInterval(() => { void acquireLease(owner); }, 10_000);
   try {
-    for (const entry of await listEntries()) {
+    for (let entry of await listEntries()) {
       if (!['queued', 'uploading'].includes(entry.status) || (entry.nextAttemptAt || 0) > Date.now()) continue;
+      entry = await prepareEntry(entry);
       await updateEntry(entry.id, { status: 'uploading', progress: null });
       try {
         const completed = await uploadEntry(entry);

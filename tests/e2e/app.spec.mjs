@@ -22,6 +22,26 @@ test('a local developer can reach the camera entry point', async ({ page }) => {
   await page.getByRole('button', { name: /Weiter zur Party/ }).click();
   await expect(page.getByRole('heading', { name: 'Halte den Abend fest.' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Foto aufnehmen/ }).first()).toBeVisible();
+  await expect(page.locator('#local-cache')).toBeHidden();
+});
+
+test('the gallery keeps search collapsed and offers a personal quick filter', async ({ page }) => {
+  await page.goto('/gallery');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Galerie');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  await expect(page.getByRole('heading', { name: 'Unser Abend in Bildern.' })).toBeVisible();
+  await expect(page.locator('#stream-link')).toHaveCount(0);
+  await expect(page.locator('#gallery-toolbar')).toBeHidden();
+
+  await page.getByRole('button', { name: 'Suche öffnen' }).click();
+  await expect(page.locator('#gallery-toolbar')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Von mir' })).toHaveAttribute('aria-pressed', 'false');
+  const mineRequest = page.waitForRequest((request) => request.url().includes('/api/photos?mine=1'));
+  await page.getByRole('button', { name: 'Von mir' }).click();
+  await expect(page.getByRole('button', { name: 'Von mir' })).toHaveAttribute('aria-pressed', 'true');
+  await mineRequest;
 });
 
 test('Chromium opens the camera shell with the fake webcam', async ({ page, browserName }, testInfo) => {
@@ -49,10 +69,13 @@ test('an offline photo survives reload and uploads when the connection returns',
   await page.getByLabel('Dein Name').fill('Playwright Offline Queue');
   await page.getByRole('button', { name: /Weiter zur Party/ }).click();
   await expect(page.getByRole('heading', { name: 'Halte den Abend fest.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Aufgabe ziehen' }).click();
+  await expect(page.getByRole('button', { name: /Foto aufnehmen/ }).first()).toBeVisible();
   await page.waitForFunction(() => navigator.serviceWorker?.controller);
   await page.waitForTimeout(250);
 
   await context.setOffline(true);
+  await expect(page.locator('#queue-control')).toBeVisible();
   const photo = await readFile(new URL('../../static/party.jpg', import.meta.url));
   await page.locator('#library-input').setInputFiles({
     name: 'offline.jpg', mimeType: 'image/jpeg', buffer: photo,
@@ -71,6 +94,17 @@ test('an offline photo survives reload and uploads when the connection returns',
   await page.locator('#local-cache').click();
   await expect(page.locator('#queue-menu')).toBeVisible();
   await expect(page.locator('#queue-control')).toBeVisible();
+  await page.locator('#queue-menu .queue-delete-action').click();
+  await expect(page.locator('#queue-menu')).toBeVisible();
+  await expect(page.locator('#queue-menu')).toContainText('Behalten');
+  await page.locator('#queue-menu').getByRole('button', { name: 'Behalten' }).click();
+  await page.locator('#queue-menu .queue-detail-trigger').click();
+  await expect(page.locator('#queue-detail')).toBeVisible();
+  await expect(page.locator('#queue-detail-image')).toBeVisible();
+  await expect(page.locator('#queue-detail-task')).toBeVisible();
+  await expect(page.locator('#queue-detail-task-text')).not.toHaveText('');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#queue-detail')).toBeHidden();
 
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Halte den Abend fest.' })).toBeVisible();
@@ -80,7 +114,65 @@ test('an offline photo survives reload and uploads when the connection returns',
   await context.setOffline(false);
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect(page.locator('#queue-control')).toBeHidden({ timeout: 15_000 });
-  await expect(page.locator('#local-cache')).toContainText('0 / 25 vorgemerkt');
+  await expect(page.locator('#local-cache')).toBeHidden();
+});
+
+test('an offline guest can inspect and remove a queued photo', async ({ page, context }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises the local queue once in Chromium.');
+  await page.goto('/');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Queue Detail');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  await page.waitForFunction(() => navigator.serviceWorker?.controller);
+  await context.setOffline(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+  const photo = await readFile(new URL('../../static/party.jpg', import.meta.url));
+  await page.locator('#library-input').setInputFiles({
+    name: 'remove-me.jpg', mimeType: 'image/jpeg', buffer: photo,
+  });
+  await page.getByRole('button', { name: 'Später hochladen' }).click();
+  await page.locator('#local-cache').click();
+  await page.getByRole('button', { name: 'Vorgemerktes Foto groß anzeigen' }).first().click();
+  await page.getByRole('button', { name: 'Foto aus der Queue löschen' }).click();
+  await expect(page.getByText('Wirklich löschen?')).toBeVisible();
+  await page.getByRole('button', { name: 'Löschen', exact: true }).click();
+  await expect(page.locator('#queue-detail')).toBeHidden();
+  await expect(page.locator('#local-cache')).toBeHidden();
+  await expect(page.locator('#queue-control')).toBeVisible();
+});
+
+test('a legacy queued record gets a valid upload ID before it is sent', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises the IndexedDB migration once in Chromium.');
+  await page.goto('/');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Legacy Queue');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  await page.waitForFunction(() => navigator.serviceWorker?.controller);
+  await page.evaluate(async () => {
+    const blob = await fetch('/static/party.jpg').then((response) => response.blob());
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('fotovibe-offline', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('outbox', 'readwrite');
+      transaction.objectStore('outbox').put({
+        id: 'old-local-photo-key', blob, name: 'legacy.jpg', type: 'image/jpeg', size: blob.size,
+        createdAt: Date.now(), updatedAt: Date.now(), status: 'error', attempts: 1,
+        nextAttemptAt: 0, lastError: 'Ungültige Foto-ID.', progress: 0,
+      });
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    window.dispatchEvent(new Event('online'));
+  });
+  await expect(page.locator('#queue-control')).toBeHidden({ timeout: 15_000 });
+  await expect(page.locator('#local-cache')).toBeHidden();
 });
 
 test('the front-camera preview mirrors only the preview and keeps the action focused', async ({ page, browserName }, testInfo) => {
