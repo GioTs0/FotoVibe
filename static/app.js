@@ -61,6 +61,8 @@ const streamStageSize = { width: 0, height: 0 };
 let streamQuality = 0;
 let streamFrames = 0;
 let streamWindowStart = 0;
+let streamWarmUp = 0;
+let streamSlowWindows = 0;
 const streamReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 // /stream?tv=1 gives the television layout without the Fullscreen API, so a
@@ -1299,9 +1301,18 @@ function streamAdapt(now) {
   const fps = (streamFrames * 1000) / elapsed;
   streamWindowStart = now;
   streamFrames = 0;
-  if (fps >= 40 || streamQuality >= 2) return;
+  // The opening seconds decode thirteen photographs at once and the frame rate
+  // dips no matter how capable the machine is. Judging it then would leave a
+  // perfectly good laptop on the lowest setting for the rest of the evening.
+  if (streamWarmUp > 0) {
+    streamWarmUp -= 1;
+    return;
+  }
+  streamSlowWindows = fps < 40 ? streamSlowWindows + 1 : 0;
+  if (streamSlowWindows < 2 || streamQuality >= 2) return;
   // Softening goes first, because it costs the most and is the least missed;
   // only if that is not enough does the corridor get shorter.
+  streamSlowWindows = 0;
   streamQuality += 1;
   $('stream-stage').classList.toggle('is-lean', streamQuality >= 1);
   $('stream-stage').classList.toggle('is-minimal', streamQuality >= 2);
@@ -1317,6 +1328,7 @@ function streamFrame(now) {
 function startStreamMotion() {
   stopStreamMotion();
   if (!authenticated || !streamPage || document.hidden || !streamPlaylist.length) return;
+  if (!streamWindowStart) streamWarmUp = 3;
   if (streamReducedMotion.matches) {
     // One still picture at a time, refreshed as the camera passes each photo.
     paintStream();
