@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -23,6 +24,8 @@ DNS_ZONE = "zone-180-foto-com"
 DOMAINS = ("180-foto.com", "www.180-foto.com")
 RUNTIME = f"fotovibe-runtime@{PROJECT}.iam.gserviceaccount.com"
 BUILDER = f"fotovibe-build@{PROJECT}.iam.gserviceaccount.com"
+# Windows ships gcloud as a .cmd; CreateProcess only resolves .exe without a full path.
+GCLOUD = shutil.which("gcloud") or "gcloud"
 
 
 def normalize_public_dependency_sources():
@@ -65,7 +68,7 @@ def verify_public_dependency_sources():
 
 
 def gc(*args, live=False, missing_ok=False):
-    command = ["gcloud", *args, f"--project={PROJECT}", "--quiet"]
+    command = [GCLOUD, *args, f"--project={PROJECT}", "--quiet"]
     result = subprocess.run(command, text=True, capture_output=not live, cwd=ROOT, check=False)
     if result.returncode:
         if missing_ok and any(

@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -11,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WATCH_SUFFIXES = {".py", ".html", ".css", ".js", ".svg"}
 WATCH_ROOTS = (ROOT / "fotovibe", ROOT / "static")
+# Windows ships npm as a .cmd; CreateProcess only resolves .exe without a full path.
+NPM = shutil.which("npm") or "npm"
 
 
 def _process_exists(pid):
@@ -122,11 +125,11 @@ def main():
     if not vendor.exists():
         print("Preparing the local HEIC preview asset …", flush=True)
         subprocess.run(
-            ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+            [NPM, "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
             cwd=ROOT,
             check=True,
         )
-        subprocess.run(["npm", "run", "build"], cwd=ROOT, check=True)
+        subprocess.run([NPM, "run", "build"], cwd=ROOT, check=True)
 
     released = release_port(args.port)
     if released:

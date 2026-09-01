@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,8 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 
 ROOT = Path(__file__).resolve().parent.parent
+# Windows ships gcloud as a .cmd; CreateProcess only resolves .exe without a full path.
+GCLOUD = shutil.which("gcloud") or "gcloud"
 
 
 def main():
@@ -21,7 +24,7 @@ def main():
     project, bucket, url = config["project"], config["bucket"], config["url"]
     secret = subprocess.check_output(
         [
-            "gcloud",
+            GCLOUD,
             "secrets",
             "versions",
             "access",
@@ -132,7 +135,7 @@ def main():
             ]
             result = subprocess.run(
                 [
-                    "gcloud",
+                    GCLOUD,
                     "storage",
                     "rm",
                     *objects,

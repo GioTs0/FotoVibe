@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import shutil
 import subprocess
 import urllib.error
 import urllib.parse
@@ -15,11 +16,13 @@ BASE = (
     "https://firestore.googleapis.com/v1/projects/"
     f"{PROJECT}/databases/{DATABASE}/documents/tasks"
 )
+# Windows ships gcloud as a .cmd; CreateProcess only resolves .exe without a full path.
+GCLOUD = shutil.which("gcloud") or "gcloud"
 
 
 def access_token():
     result = subprocess.run(
-        ["gcloud", "auth", "print-access-token", f"--project={PROJECT}", "--quiet"],
+        [GCLOUD, "auth", "print-access-token", f"--project={PROJECT}", "--quiet"],
         check=True,
         capture_output=True,
         text=True,
