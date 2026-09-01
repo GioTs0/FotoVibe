@@ -63,6 +63,10 @@ let streamFrames = 0;
 let streamWindowStart = 0;
 const streamReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
+// /stream?tv=1 gives the television layout without the Fullscreen API, so a
+// browser started in kiosk mode needs no interaction at all.
+const tvMode = streamPage && new URLSearchParams(location.search).get('tv') === '1';
+document.body.classList.toggle('tv-mode', tvMode);
 $('page-backdrop').hidden = false;
 $(streamPage ? 'nav-stream' : galleryPage ? 'nav-gallery' : 'nav-upload').setAttribute('aria-current', 'page');
 document.title = galleryPage ? 'Unsere Galerie · 180. Geburtstag' : streamPage ? 'Stream · 180. Geburtstag' : 'Foto teilen · 180. Geburtstag';
