@@ -4,9 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#2b2823">
   <meta name="robots" content="noindex, nofollow">
   <title>180. Geburtstag · Unsere Partyfotos</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" type="module"></script>
 </head>
@@ -15,8 +18,20 @@
   <a class="skip" href="#main">Zum Inhalt</a>
   <header class="topbar">
     <a class="brand" href="/" aria-label="180. Geburtstag Startseite"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 6.5 8H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-2.5L16 5Z"/><circle cx="12" cy="14" r="4"/></svg>180. Geburtstag</a>
-    <nav aria-label="Hauptnavigation">
+    <nav class="main-nav" aria-label="Hauptnavigation">
       <a href="/" id="nav-upload">Foto teilen</a><a href="/gallery" id="nav-gallery">Galerie</a><a href="/stream" id="nav-stream">Stream</a>
+    </nav>
+    <div class="header-controls">
+      <div id="queue-control" class="queue-control" hidden>
+        <button id="queue-button" class="queue-button" type="button" aria-expanded="false" aria-controls="queue-menu">
+          <span class="queue-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 18.5h10a4 4 0 0 0 .7-7.94A5.8 5.8 0 0 0 6.8 9.2 4.7 4.7 0 0 0 7 18.5Z"/><path d="m12 15.5 0-7M9.5 11 12 8.5 14.5 11"/></svg></span>
+          <span id="queue-badge" class="queue-badge" aria-hidden="true">1</span><span class="sr-only" id="queue-label" aria-live="polite">Ein Foto wartet auf den Upload.</span>
+        </button>
+        <div id="queue-menu" class="queue-menu" hidden>
+          <p class="queue-menu-title">Foto-Uploads</p>
+          <div id="queue-list" class="queue-list"></div>
+        </div>
+      </div>
       <div id="profile-control" class="profile-control" hidden>
         <button id="profile-button" class="profile-button" type="button" aria-expanded="false" aria-controls="profile-menu"><span id="profile-initial" class="profile-initial" aria-hidden="true">?</span><span class="sr-only">Profil öffnen</span></button>
         <div id="profile-menu" class="profile-menu" hidden>
@@ -36,9 +51,13 @@
           </form>
           <button id="admin-open" class="secondary admin-open" type="button" hidden>Admin-Panel öffnen</button>
           <button id="profile-logout" class="text-button" type="button">Abmelden</button>
+          <div id="logout-pending" class="logout-pending" hidden>
+            <p id="logout-pending-text"></p>
+            <div><button id="logout-keep" class="secondary" type="button">Lokal behalten</button><button id="logout-delete" class="text-button" type="button">Fotos löschen</button><button id="logout-cancel" class="text-button" type="button">Abbrechen</button></div>
+          </div>
         </div>
       </div>
-    </nav>
+    </div>
   </header>
   <main id="main">
     <p id="boot" class="muted narrow" role="status">180. Geburtstag wird geöffnet …</p>
@@ -98,7 +117,10 @@
         <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
         <input id="library-input" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" hidden>
       </div>
-      <div id="success" hidden role="status"><span class="success-mark" aria-hidden="true">✓</span><h2>Dein Moment ist dabei.</h2><p>Das Foto ist jetzt in unserer Galerie.</p><div class="actions"><button id="another" class="primary" type="button">Noch ein Foto teilen</button><a class="button secondary" href="/gallery">Zur Galerie</a></div></div>
+      <button id="local-cache" class="local-cache" type="button" disabled aria-controls="queue-menu" aria-label="Keine Fotos lokal vorgemerkt">
+        <span aria-hidden="true">☁</span><span id="local-cache-text">0 / 25 vorgemerkt</span>
+      </button>
+      <div id="success" hidden><span class="success-mark" aria-hidden="true">✓</span><h2>Foto gespeichert.</h2><p id="success-status" class="upload-status" role="status"><span aria-hidden="true">↑</span> Wird geteilt</p><div class="actions"><button id="another" class="primary" type="button">Noch ein Foto teilen</button><a class="button secondary" href="/gallery">Zur Galerie</a></div></div>
     </section>
     <section id="gallery" class="gallery" hidden aria-labelledby="gallery-title">
       <div id="gallery-overview">
@@ -194,14 +216,13 @@
       </aside>
       <button id="preview-task-restore" class="capture-task-restore" type="button" hidden>Aufgabe zeigen</button>
       <div class="review-bottombar">
-        <p id="file-info" class="capture-file-info"></p>
-        <p id="preview-status" role="status" class="capture-preview-status"></p>
         <p id="upload-error" class="capture-error" role="alert"></p>
         <div id="progress-wrap" hidden><progress id="progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress><p id="progress-text" role="status"></p></div>
         <button id="send" class="capture-upload" type="button" disabled>Foto hochladen <span aria-hidden="true">↑</span></button>
       </div>
     </section>
   </div>
+  <p id="queue-notice" class="queue-notice" role="status" aria-live="polite" hidden></p>
   <footer><span>Gemeinsam aufgenommen. Gemeinsam erinnert.</span><button id="logout" type="button" class="text-button" hidden>Abmelden</button></footer>
   <noscript><p class="narrow error">Bitte JavaScript aktivieren, um Fotos anzusehen und zu teilen.</p></noscript>
 </body>

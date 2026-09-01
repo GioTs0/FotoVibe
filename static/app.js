@@ -1,8 +1,26 @@
+import {
+  acquireUploadLease,
+  addOutboxEntry,
+  clearOutbox,
+  deleteOutboxEntry,
+  getOfflineState,
+  listOutbox,
+  openOfflineStore,
+  outboxSummary,
+  releaseUploadLease,
+  resetInterruptedUploads,
+  setOfflineState,
+  updateOutboxEntry,
+} from '/static/offline-store.js';
+
 const $ = (id) => document.getElementById(id);
 const galleryPage = location.pathname === '/gallery';
 const streamPage = location.pathname === '/stream';
 const MAX_BYTES = 25 * 1024 * 1024;
 const DEVICE_STORAGE_KEY = 'fotovibe_device_id';
+const OUTBOX_MAX_ITEMS = 25;
+const OUTBOX_MAX_BYTES = 250 * 1024 * 1024;
+const OUTBOX_HEADROOM_BYTES = 20 * 1024 * 1024;
 let cachedDeviceId = null;
 let authenticated = false;
 let currentUser = null;
@@ -10,6 +28,7 @@ let selected = null;
 let uploadId = null;
 let previewUrl = null;
 let previewGeneration = 0;
+let previewMirrored = false;
 let uploading = false;
 let timer = null;
 let galleryBusy = false;
@@ -38,6 +57,19 @@ let captureFullscreenWanted = false;
 let selectionSource = null;
 let currentTask = null;
 let taskBusy = false;
+let cachedTasks = [];
+let taskBag = [];
+let lastDrawnTaskId = null;
+let outboxEntries = [];
+let queueSyncing = false;
+let queueSyncTimer = null;
+let queueDoneTimer = null;
+let queueNoticeTimer = null;
+let lastQueuedId = null;
+let offlineMode = false;
+let locallySignedOut = false;
+const queueOwner = `page-${crypto.randomUUID()}`;
+const queuePreviewUrls = new Set();
 // The stream keeps no server state: every screen derives what it shows from the
 // clock, which is what keeps the television and the phones together.
 const STREAM_SPACING = 340; // distance in depth between two photos
@@ -103,9 +135,368 @@ function deviceId() {
   return cachedDeviceId;
 }
 
+function formatBytes(bytes) {
+  return `${(bytes / 1024 / 1024).toLocaleString('de', { maximumFractionDigits: 1 })} MiB`;
+}
+
+function retryAfterMilliseconds(value) {
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  const timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp) && timestamp > Date.now() ? timestamp - Date.now() : 0;
+}
+
+function closeQueueMenu() {
+  $('queue-menu').hidden = true;
+  $('queue-button').setAttribute('aria-expanded', 'false');
+}
+
+function openQueueMenu() {
+  if ($('queue-control').hidden) return;
+  closeProfileMenu();
+  $('queue-menu').hidden = false;
+  $('queue-button').setAttribute('aria-expanded', 'true');
+}
+
+function updateLocalCacheStatus(entries = outboxEntries) {
+  const count = entries.length;
+  const button = $('local-cache');
+  $('local-cache-text').textContent = `${count} / ${OUTBOX_MAX_ITEMS} vorgemerkt`;
+  button.disabled = count === 0;
+  button.setAttribute('aria-label', count === 0
+    ? 'Keine Fotos lokal vorgemerkt'
+    : `${count} von ${OUTBOX_MAX_ITEMS} Fotos lokal vorgemerkt. Upload-Liste öffnen.`);
+}
+
+function showQueueNotice(count) {
+  const notice = $('queue-notice');
+  clearTimeout(queueNoticeTimer);
+  notice.textContent = `Eingereiht · ${count} / ${OUTBOX_MAX_ITEMS}`;
+  notice.hidden = false;
+  queueNoticeTimer = setTimeout(() => { notice.hidden = true; }, 2400);
+}
+
+function updateSendAction() {
+  if (!$('review').hidden && selected && !uploading) {
+    $('send').textContent = navigator.onLine === false ? 'Später hochladen' : 'Foto hochladen';
+  }
+}
+
+function releaseQueuePreviews() {
+  queuePreviewUrls.forEach((url) => URL.revokeObjectURL(url));
+  queuePreviewUrls.clear();
+}
+
+function queueEntryLabel(entry) {
+  if (entry.status === 'uploading') return entry.progress > 0 ? `${entry.progress} %` : 'Lädt hoch';
+  if (entry.status === 'blocked') return 'Anmelden';
+  if (entry.status === 'error') return 'Fehler';
+  return 'Wartet';
+}
+
+function queueState(entries) {
+  if (entries.some((entry) => entry.status === 'blocked')) return 'blocked';
+  if (entries.some((entry) => entry.status === 'error')) return 'error';
+  if (entries.some((entry) => entry.status === 'uploading')) return 'uploading';
+  return 'queued';
+}
+
+function setSuccessStatus(text, symbol = '↑') {
+  const status = $('success-status');
+  status.replaceChildren();
+  const icon = document.createElement('span');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = symbol;
+  status.append(icon, ` ${text}`);
+}
+
+function iconButton(label, symbol, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'queue-action';
+  button.setAttribute('aria-label', label);
+  button.textContent = symbol;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function showQueueDeleteConfirmation(row, entry) {
+  const actions = row.querySelector('.queue-actions');
+  actions.replaceChildren();
+  const keep = document.createElement('button');
+  keep.type = 'button';
+  keep.className = 'queue-keep';
+  keep.textContent = 'Behalten';
+  keep.addEventListener('click', renderQueue);
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'queue-delete-confirm';
+  remove.textContent = 'Löschen';
+  remove.addEventListener('click', async () => {
+    await deleteOutboxEntry(entry.id);
+    if (lastQueuedId === entry.id) lastQueuedId = null;
+    await refreshOutbox();
+  });
+  actions.append(keep, remove);
+}
+
+function renderQueue() {
+  releaseQueuePreviews();
+  const control = $('queue-control');
+  const badge = $('queue-badge');
+  const button = $('queue-button');
+  const label = $('queue-label');
+  const list = $('queue-list');
+  const entries = outboxEntries;
+  updateLocalCacheStatus(entries);
+  const state = queueState(entries);
+  button.dataset.state = state;
+  button.style.removeProperty('--queue-progress');
+
+  if (!entries.length) {
+    if (lastQueuedId) {
+      control.hidden = false;
+      button.dataset.state = 'done';
+      badge.textContent = '✓';
+      label.textContent = 'Alle vorgemerkten Fotos wurden übertragen.';
+      clearTimeout(queueDoneTimer);
+      queueDoneTimer = setTimeout(() => {
+        if (!outboxEntries.length) {
+          control.hidden = true;
+          closeQueueMenu();
+        }
+      }, 1500);
+    } else {
+      control.hidden = true;
+      closeQueueMenu();
+    }
+  } else {
+    clearTimeout(queueDoneTimer);
+    control.hidden = false;
+    const uploading = entries.find((entry) => entry.status === 'uploading');
+    badge.textContent = state === 'blocked' ? '🔒' : state === 'error' ? '!' : String(entries.length);
+    if (uploading && Number.isFinite(uploading.progress)) {
+      button.style.setProperty('--queue-progress', `${Math.max(0, Math.min(100, uploading.progress)) * 3.6}deg`);
+    }
+    const queuedText = entries.length === 1 ? 'Ein Foto' : `${entries.length} Fotos`;
+    label.textContent = state === 'blocked'
+      ? `${queuedText} warten auf eine Anmeldung.`
+      : state === 'error'
+        ? `${queuedText} brauchen Aufmerksamkeit.`
+        : state === 'uploading'
+          ? `${queuedText} werden übertragen.`
+          : `${queuedText} warten auf den Upload.`;
+  }
+  button.setAttribute('aria-label', label.textContent);
+
+  list.replaceChildren();
+  for (const entry of entries) {
+    const row = document.createElement('article');
+    row.className = `queue-item is-${entry.status}`;
+    const thumbnail = document.createElement('img');
+    thumbnail.className = 'queue-thumbnail';
+    const preview = entry.thumbnail || entry.blob;
+    if (preview) {
+      const url = URL.createObjectURL(preview);
+      queuePreviewUrls.add(url);
+      thumbnail.src = url;
+      thumbnail.alt = '';
+    }
+    const detail = document.createElement('div');
+    detail.className = 'queue-item-detail';
+    const line = document.createElement('p');
+    line.className = 'queue-item-state';
+    const stateIcon = document.createElement('span');
+    stateIcon.setAttribute('aria-hidden', 'true');
+    stateIcon.textContent = entry.status === 'blocked' ? '🔒' : entry.status === 'error' ? '!' : entry.status === 'uploading' ? '↑' : '○';
+    line.append(stateIcon, ` ${queueEntryLabel(entry)}`);
+    detail.append(line);
+    let errorDetail = null;
+    if (entry.status === 'error') {
+      const error = document.createElement('p');
+      error.className = 'queue-item-error';
+      error.hidden = true;
+      error.textContent = entry.lastError || 'Bitte erneut versuchen.';
+      detail.append(error);
+      errorDetail = error;
+    }
+    const actions = document.createElement('div');
+    actions.className = 'queue-actions';
+    if (errorDetail) {
+      actions.append(iconButton('Fehlerdetails anzeigen', 'i', (clickEvent) => {
+        const visible = errorDetail.hidden;
+        errorDetail.hidden = !visible;
+        clickEvent.currentTarget.setAttribute('aria-label', visible ? 'Fehlerdetails ausblenden' : 'Fehlerdetails anzeigen');
+      }));
+    }
+    if (entry.status === 'error' || entry.status === 'blocked') {
+      actions.append(iconButton('Upload erneut versuchen', '↻', async () => {
+        await updateOutboxEntry(entry.id, { status: 'queued', nextAttemptAt: 0, lastError: '', progress: 0 });
+        await refreshOutbox();
+        scheduleQueueSync();
+      }));
+    }
+    actions.append(iconButton('Dieses lokal gespeicherte Foto löschen', '×', () => showQueueDeleteConfirmation(row, entry)));
+    row.append(thumbnail, detail, actions);
+    list.append(row);
+  }
+
+  if (!$('success').hidden && lastQueuedId) {
+    const current = entries.find((entry) => entry.id === lastQueuedId);
+    if (!current) setSuccessStatus('Geteilt', '✓');
+    else if (current.status === 'blocked') setSuccessStatus('Anmeldung nötig', '🔒');
+    else if (current.status === 'error') setSuccessStatus('Bitte prüfen', '!');
+    else if (current.status === 'uploading') setSuccessStatus('Wird geteilt', '↑');
+    else setSuccessStatus('Wartet auf Netz', '○');
+  }
+}
+
+async function refreshOutbox() {
+  try {
+    outboxEntries = (await outboxSummary()).entries;
+  } catch {
+    outboxEntries = [];
+  }
+  renderQueue();
+  scheduleNextQueueSync();
+  return outboxEntries;
+}
+
+function scheduleNextQueueSync() {
+  clearTimeout(queueSyncTimer);
+  if (!authenticated || locallySignedOut) return;
+  const next = outboxEntries
+    .filter((entry) => entry.status === 'queued' && entry.nextAttemptAt > Date.now())
+    .map((entry) => entry.nextAttemptAt)
+    .sort((left, right) => left - right)[0];
+  if (next) queueSyncTimer = setTimeout(scheduleQueueSync, Math.max(250, next - Date.now()));
+}
+
+async function requestBackgroundSync() {
+  try {
+    const registration = await navigator.serviceWorker?.ready;
+    if (registration?.sync) await registration.sync.register('fotovibe-outbox');
+  } catch {
+    // Opening FotoVibe again remains the cross-browser fallback.
+  }
+}
+
+function scheduleQueueSync() {
+  void syncOutbox();
+  void requestBackgroundSync();
+}
+
+async function syncOutbox() {
+  if (queueSyncing || !authenticated || !currentUser || locallySignedOut) return;
+  if (!(await acquireUploadLease(queueOwner))) return;
+  queueSyncing = true;
+  const leaseRenewal = setInterval(() => { void acquireUploadLease(queueOwner); }, 10_000);
+  try {
+    for (const entry of await listOutbox()) {
+      if (entry.status !== 'queued' || (entry.nextAttemptAt || 0) > Date.now()) continue;
+      await updateOutboxEntry(entry.id, { status: 'uploading', progress: 0 });
+      await refreshOutbox();
+      try {
+        const result = await sendPhoto(entry.blob, entry.id, entry.task, async (progress) => {
+          await updateOutboxEntry(entry.id, { progress });
+          await refreshOutbox();
+        });
+        await deleteOutboxEntry(entry.id);
+        if (result.created && currentUser?.values) {
+          showUser({ ...currentUser, values: { ...currentUser.values, photos_uploaded: (currentUser.values.photos_uploaded || 0) + 1 } });
+          void setOfflineState('user', currentUser);
+        }
+        await refreshOutbox();
+      } catch (error) {
+        const attempts = (entry.attempts || 0) + 1;
+        if (error.status === 401) {
+          await updateOutboxEntry(entry.id, { status: 'blocked', attempts, progress: 0, lastError: 'Bitte anmelden.' });
+          showLogin('Bitte melde dich erneut an, damit deine Fotos geteilt werden können.');
+        } else if (error.network || error.status === 429 || error.status >= 500) {
+          const delay = error.retryAfter || Math.min(300000, 5000 * (2 ** Math.min(attempts, 6)));
+          await updateOutboxEntry(entry.id, {
+            status: 'queued', attempts, progress: 0, lastError: error.message,
+            nextAttemptAt: Date.now() + delay,
+          });
+        } else {
+          await updateOutboxEntry(entry.id, { status: 'error', attempts, progress: 0, lastError: error.message });
+        }
+        await refreshOutbox();
+        break;
+      }
+    }
+  } finally {
+    clearInterval(leaseRenewal);
+    queueSyncing = false;
+    await releaseUploadLease(queueOwner);
+    await refreshOutbox();
+  }
+}
+
+async function ensureOutboxCapacity(file) {
+  const { count, bytes } = await outboxSummary();
+  if (count >= OUTBOX_MAX_ITEMS || bytes + file.size > OUTBOX_MAX_BYTES) {
+    throw new Error('Der lokale Foto-Speicher ist voll. Bitte warte auf einen Upload.');
+  }
+  if (navigator.storage?.estimate) {
+    const estimate = await navigator.storage.estimate();
+    const available = (estimate.quota || 0) - (estimate.usage || 0);
+    if (estimate.quota && available < file.size + OUTBOX_HEADROOM_BYTES) {
+      throw new Error('Auf diesem Gerät ist zu wenig freier Speicher für das Foto.');
+    }
+  }
+}
+
+async function queueThumbnail() {
+  const image = $('preview');
+  if (!image.naturalWidth || !image.naturalHeight) return null;
+  const scale = Math.min(1, 180 / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.72));
+}
+
+async function queueSelectedPhoto() {
+  await ensureOutboxCapacity(selected);
+  const thumbnail = await queueThumbnail();
+  const entry = {
+    id: uploadId,
+    blob: selected,
+    thumbnail,
+    name: selected.name,
+    type: selected.type,
+    size: selected.size,
+    lastModified: selected.lastModified,
+    deviceId: deviceId(),
+    task: currentTask ? { id: currentTask.id, text: currentTask.text, task_token: currentTask.task_token } : null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'queued',
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastError: '',
+    progress: 0,
+  };
+  await addOutboxEntry(entry);
+  lastQueuedId = entry.id;
+  await refreshOutbox();
+  return entry;
+}
+
+async function requestPersistentStorage() {
+  try {
+    if (navigator.storage?.persist && !(await navigator.storage.persisted?.())) await navigator.storage.persist();
+  } catch {
+    // Browser storage remains best effort when persistent mode is unavailable.
+  }
+}
+
 function closeProfileMenu() {
   $('profile-menu').hidden = true;
   $('profile-button').setAttribute('aria-expanded', 'false');
+  $('logout-pending').hidden = true;
 }
 
 function showUser(user) {
@@ -140,18 +531,72 @@ function showLogin(message = '') {
 async function api(path, options = {}) {
   let response;
   try { response = await fetch(path, { credentials: 'same-origin', ...options }); }
-  catch { throw new Error('Keine Verbindung. Bitte dein Netz prüfen und erneut versuchen.'); }
+  catch {
+    const error = new Error('Keine Verbindung. Bitte dein Netz prüfen und erneut versuchen.');
+    error.network = true;
+    throw error;
+  }
   if (!response.ok) {
     let message = 'Das hat gerade nicht geklappt. Bitte erneut versuchen.';
     try { const result = await response.json(); if (typeof result.detail === 'string') message = result.detail; } catch {}
     if (response.status === 401 && authenticated) showLogin('Dein Zugang ist abgelaufen. Bitte den Party-Code erneut eingeben.');
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
 
-async function enter(user) {
+async function refreshTaskCache() {
+  const result = await api('/api/tasks');
+  cachedTasks = Array.isArray(result.tasks) ? result.tasks.filter((task) => task?.id && task?.text && task?.task_token) : [];
+  taskBag = [];
+  lastDrawnTaskId = cachedTasks.some((task) => task.id === lastDrawnTaskId) ? lastDrawnTaskId : null;
+  await persistTaskState();
+  return cachedTasks;
+}
+
+async function persistTaskState() {
+  await setOfflineState('tasks', {
+    tasks: cachedTasks,
+    bag: taskBag,
+    lastDrawnTaskId,
+    fetchedAt: Date.now(),
+  });
+}
+
+function nextCachedTask(previousId = lastDrawnTaskId) {
+  const available = cachedTasks.filter((task) => task.id !== previousId);
+  if (!available.length) return cachedTasks[0] || null;
+  if (!taskBag.length || !taskBag.some((id) => available.some((task) => task.id === id))) {
+    taskBag = available.map((task) => task.id);
+    for (let index = taskBag.length - 1; index > 0; index--) {
+      const swap = Math.floor(Math.random() * (index + 1));
+      [taskBag[index], taskBag[swap]] = [taskBag[swap], taskBag[index]];
+    }
+  }
+  const id = taskBag.shift();
+  const task = available.find((candidate) => candidate.id === id) || available[0];
+  lastDrawnTaskId = task.id;
+  void persistTaskState().catch(() => {});
+  return task;
+}
+
+async function resumeBlockedOutbox() {
+  try {
+    for (const entry of await listOutbox()) {
+      if (entry.status === 'blocked') {
+        await updateOutboxEntry(entry.id, { status: 'queued', nextAttemptAt: 0, lastError: '', progress: 0 });
+      }
+    }
+  } catch {
+    // A browser without IndexedDB still uses the direct upload fallback.
+  }
+}
+
+async function enter(user, { offline = false } = {}) {
   authenticated = true;
+  offlineMode = offline;
   $('boot').hidden = $('login').hidden = $('profile-setup').hidden = true;
   showUser(user);
   if (!currentUser) {
@@ -163,10 +608,26 @@ async function enter(user) {
   $('logout').hidden = false;
   $('admin').hidden = true;
   $('party-code').value = '';
+  locallySignedOut = false;
+  await setOfflineState('signed-out', false).catch(() => {});
+  await setOfflineState('user', currentUser).catch(() => {});
+  void requestPersistentStorage();
+  if (!offline) {
+    await resumeBlockedOutbox();
+    void refreshTaskCache().catch(() => {});
+  }
   $(galleryPage ? 'gallery' : streamPage ? 'stream' : 'upload').hidden = false;
   if (!galleryPage && !streamPage && selected) showReviewShell();
-  if (galleryPage) await loadGallery(false);
-  if (streamPage) await loadStream();
+  if (galleryPage) {
+    if (offline) $('gallery-error').textContent = 'Ohne Netz sind nur neue Fotos verfügbar.';
+    else await loadGallery(false);
+  }
+  if (streamPage) {
+    if (offline) $('stream-error').textContent = 'Ohne Netz ist der Stream nicht verfügbar.';
+    else await loadStream();
+  }
+  await refreshOutbox();
+  if (!offline) scheduleQueueSync();
   return true;
 }
 
@@ -182,24 +643,52 @@ $('login-form').addEventListener('submit', async (event) => {
   finally { $('login-submit').disabled = false; $('login-submit').textContent = 'Dabei sein →'; }
 });
 
-$('logout').addEventListener('click', async () => {
+async function completeLogout(deleteQueued) {
+  if (deleteQueued) await clearOutbox();
+  locallySignedOut = true;
+  await setOfflineState('signed-out', true).catch(() => {});
+  await refreshOutbox();
+  closeProfileMenu();
+  authenticated = false;
+  showLogin();
+  try { await fetch('/api/session', { method: 'DELETE', credentials: 'same-origin' }); } catch {}
+}
+
+function beginLogout() {
   if (uploading) return;
-  try { await api('/api/session', { method: 'DELETE' }); location.reload(); }
-  catch (error) { window.alert(error.message); }
-});
+  if (!outboxEntries.length) {
+    void completeLogout(false);
+    return;
+  }
+  $('logout-pending-text').textContent = `${outboxEntries.length} ${outboxEntries.length === 1 ? 'Foto wartet' : 'Fotos warten'} noch.`;
+  $('logout-pending').hidden = false;
+}
+
+$('logout').addEventListener('click', beginLogout);
+$('logout-keep').addEventListener('click', () => void completeLogout(false));
+$('logout-delete').addEventListener('click', () => void completeLogout(true));
+$('logout-cancel').addEventListener('click', () => { $('logout-pending').hidden = true; });
 
 $('profile-logout').addEventListener('click', () => $('logout').click());
 $('profile-button').addEventListener('click', () => {
   const opening = $('profile-menu').hidden;
+  closeQueueMenu();
   $('profile-menu').hidden = !opening;
   $('profile-button').setAttribute('aria-expanded', String(opening));
 });
+$('queue-button').addEventListener('click', () => {
+  if ($('queue-menu').hidden) openQueueMenu();
+  else closeQueueMenu();
+});
+$('local-cache').addEventListener('click', openQueueMenu);
 document.addEventListener('click', (event) => {
   if (!$('profile-control').hidden && !$('profile-control').contains(event.target)) closeProfileMenu();
+  if (!$('queue-control').hidden && !$('queue-control').contains(event.target) && !$('local-cache').contains(event.target)) closeQueueMenu();
 });
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   closeProfileMenu();
+  closeQueueMenu();
   if (!$('camera-view').hidden) $('close-camera').click();
   else if (!$('review').hidden && !uploading) $('discard').click();
 });
@@ -237,6 +726,7 @@ $('task-add-form').addEventListener('submit', async (event) => {
   $('task-add-submit').disabled = true;
   try {
     await api('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: $('task-add-input').value }) });
+    await refreshTaskCache();
     $('task-add-input').value = '';
     $('task-add-status').textContent = 'Die Aufgabe ist ab jetzt in der Auswahl.';
   } catch (error) { $('task-add-error').textContent = error.message; }
@@ -440,6 +930,7 @@ function renderAdminTasks(tasks) {
       $('admin-error').textContent = '';
       try {
         await api(`/api/admin/tasks/${task.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text.value }) });
+        await refreshTaskCache();
         await loadAdminTasks();
       } catch (error) { $('admin-error').textContent = error.message; save.disabled = false; }
     });
@@ -453,6 +944,7 @@ function renderAdminTasks(tasks) {
       $('admin-error').textContent = '';
       try {
         await api(`/api/admin/tasks/${task.id}`, { method: 'DELETE' });
+        await refreshTaskCache();
         await loadAdminTasks();
       } catch (error) { $('admin-error').textContent = error.message; remove.disabled = false; }
     });
@@ -519,6 +1011,7 @@ $('admin-task-create-form').addEventListener('submit', async (event) => {
   try {
     await api('/api/admin/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: $('admin-task-create-input').value }) });
     $('admin-task-create-input').value = '';
+    await refreshTaskCache();
     await loadAdminTasks();
   } catch (error) { $('admin-error').textContent = error.message; }
   finally { $('admin-task-create-submit').disabled = false; }
@@ -681,8 +1174,9 @@ async function drawChallenge() {
   $('challenge-draw').querySelector('strong').textContent = 'Aufgabe wird gezogen …';
   $('challenge-again').textContent = 'Einen Moment …';
   try {
-    const query = previous ? `?exclude=${encodeURIComponent(previous)}` : '';
-    currentTask = await api('/api/tasks/random' + query);
+    if (!cachedTasks.length && !offlineMode) await refreshTaskCache();
+    currentTask = nextCachedTask(previous);
+    if (!currentTask) throw new Error('Gerade ist keine Foto-Aufgabe verfügbar.');
     $('challenge-text').textContent = currentTask.text;
     $('challenge-draw').hidden = true;
     $('challenge-panel').hidden = false;
@@ -815,8 +1309,9 @@ async function captureCameraPhoto() {
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const file = new File([blob], `aufnahme-${stamp}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+  const mirrored = $('camera-view').dataset.facing === 'user';
   stopCamera(false);
-  await selectPhoto(file, 'camera');
+  await selectPhoto(file, 'camera', mirrored);
 }
 
 function clearSelection() {
@@ -825,11 +1320,13 @@ function clearSelection() {
   uploadId = null;
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   previewUrl = null;
+  previewMirrored = false;
   selectionSource = null;
   document.body.classList.remove('review-open');
   setCaptureAccessibility();
   scheduleCaptureFullscreenExit();
   $('preview').removeAttribute('src');
+  $('preview').classList.remove('is-mirrored');
   $('preview').hidden = $('review').hidden = $('success').hidden = $('progress-wrap').hidden = true;
   $('challenge').hidden = false;
   $('challenge-draw').hidden = Boolean(currentTask);
@@ -840,7 +1337,7 @@ function clearSelection() {
   $('free-divider').hidden = Boolean(currentTask);
   $('upload-error').textContent = '';
   $('send').disabled = true;
-  $('send').textContent = 'Foto hochladen ↑';
+  $('send').textContent = 'Foto hochladen';
 }
 
 function showReviewShell() {
@@ -874,7 +1371,7 @@ async function convertHeic(file) {
   return module.heicTo({ blob: file, type: 'image/jpeg', quality: 0.75 });
 }
 
-async function selectPhoto(file, source = 'library') {
+async function selectPhoto(file, source = 'library', mirrored = false) {
   clearSelection();
   selectionSource = source;
   showReviewShell();
@@ -882,9 +1379,8 @@ async function selectPhoto(file, source = 'library') {
   if (file.size > MAX_BYTES) { $('upload-error').textContent = 'Dieses Foto ist größer als 25 MiB. Bitte ein anderes wählen.'; return; }
   if (!file.size) { $('upload-error').textContent = 'Die Datei ist leer. Bitte ein anderes Foto wählen.'; return; }
   selected = file;
+  previewMirrored = mirrored;
   uploadId = crypto.randomUUID();
-  $('file-info').textContent = `${(file.size / 1024 / 1024).toLocaleString('de', { maximumFractionDigits: 1 })} MiB · Original bleibt erhalten`;
-  $('preview-status').textContent = 'Vorschau wird auf deinem Gerät erstellt …';
   let url = URL.createObjectURL(file);
   try {
     let image;
@@ -900,14 +1396,14 @@ async function selectPhoto(file, source = 'library') {
     if (image.naturalWidth * image.naturalHeight > 64_000_000) throw new Error('Dieses Foto hat mehr als 64 Megapixel. Bitte ein anderes wählen.');
     previewUrl = url;
     $('preview').src = url;
+    $('preview').classList.toggle('is-mirrored', previewMirrored);
     $('preview').hidden = false;
-    $('preview-status').textContent = 'Sieht gut aus? Erst beim Hochladen wird dein Foto geteilt.';
     $('send').disabled = false;
+    updateSendAction();
     $('send').focus();
   } catch (error) {
     URL.revokeObjectURL(url);
     if (generation !== previewGeneration) return;
-    $('preview-status').textContent = '';
     $('upload-error').textContent = error.message || 'Die Vorschau konnte nicht erstellt werden. Bitte ein anderes Foto wählen.';
   }
 }
@@ -921,76 +1417,108 @@ $('discard').addEventListener('click', () => {
 });
 $('another').addEventListener('click', () => { clearSelection(); $('camera').focus(); });
 
-function sendPhoto(file, id, task) {
+function sendPhoto(file, id, task, onProgress = () => {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/photos');
     xhr.timeout = 300000;
     const data = new FormData();
     data.append('upload_id', id);
-    if (task?.id) data.append('task_id', task.id);
+    if (task?.task_token) data.append('task_token', task.task_token);
+    else if (task?.id) data.append('task_id', task.id);
     data.append('photo', file);
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
       const value = Math.round(event.loaded / event.total * 100);
-      $('progress').value = value;
-      $('progress-text').textContent = value < 100 ? `Foto wird übertragen: ${value} %` : 'Foto ist übertragen. Es wird gespeichert und für die Galerie vorbereitet …';
+      void onProgress(value);
     };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) { resolve({ created: xhr.status === 201 }); return; }
       let message = 'Upload fehlgeschlagen. Du kannst es mit demselben Foto erneut versuchen.';
       try { const result = JSON.parse(xhr.responseText); if (typeof result.detail === 'string') message = result.detail; } catch {}
-      if (xhr.status === 401) showLogin('Bitte den Party-Code erneut eingeben. Dein ausgewähltes Foto bleibt hier erhalten.');
-      reject(new Error(message));
+      const error = new Error(message);
+      error.status = xhr.status;
+      const retryAfter = retryAfterMilliseconds(xhr.getResponseHeader('Retry-After'));
+      if (retryAfter) error.retryAfter = retryAfter;
+      reject(error);
     };
-    xhr.onerror = () => reject(new Error('Die Verbindung wurde unterbrochen. Bitte erneut versuchen; dein Foto wird nicht doppelt gespeichert.'));
-    xhr.ontimeout = () => reject(new Error('Die Übertragung dauert zu lange. Bitte die Verbindung prüfen und erneut versuchen.'));
+    xhr.onerror = () => {
+      const error = new Error('Die Verbindung wurde unterbrochen.');
+      error.network = true;
+      reject(error);
+    };
+    xhr.ontimeout = () => {
+      const error = new Error('Die Übertragung dauert zu lange.');
+      error.network = true;
+      reject(error);
+    };
     xhr.send(data);
   });
 }
 
 $('send').addEventListener('click', async () => {
   if (!selected || uploading) return;
+  const queuedOffline = navigator.onLine === false;
   uploading = true;
   $('send').disabled = $('discard').disabled = $('logout').disabled = true;
-  $('send').textContent = 'Wird hochgeladen …';
+  $('send').textContent = 'Wird gespeichert …';
   $('upload-error').textContent = '';
-  $('progress-wrap').hidden = false;
-  $('progress').value = 0;
-  $('progress-text').textContent = 'Die Übertragung startet …';
   try {
-    const result = await sendPhoto(selected, uploadId, currentTask);
-    if (result.created && currentUser?.values) {
-      showUser({
-        ...currentUser,
-        values: {
-          ...currentUser.values,
-          photos_uploaded: (currentUser.values.photos_uploaded || 0) + 1,
-        },
-      });
-    }
-    api('/api/session').then((profile) => showUser(profile.user)).catch(() => {});
+    await queueSelectedPhoto();
     clearSelection();
-    clearChallenge(false);
-    $('challenge').hidden = true;
-    $('free-divider').hidden = true;
-    $('pick-actions').hidden = true;
-    $('success').hidden = false;
-    $('another').focus();
+    clearChallenge(queuedOffline);
+    if (queuedOffline) {
+      showQueueNotice(outboxEntries.length);
+      $('camera').focus();
+    } else {
+      $('challenge').hidden = true;
+      $('free-divider').hidden = true;
+      $('pick-actions').hidden = true;
+      $('success').hidden = false;
+      setSuccessStatus('Wird geteilt', '↑');
+      $('another').focus();
+    }
+    scheduleQueueSync();
   } catch (error) {
-    $('upload-error').textContent = error.message;
-    $('progress-wrap').hidden = true;
-    $('send').disabled = false;
-    $('send').textContent = 'Erneut hochladen ↑';
+    if (navigator.onLine !== false) {
+      $('progress-wrap').hidden = false;
+      $('progress').value = 0;
+      $('progress-text').textContent = 'Foto wird übertragen …';
+      try {
+        const result = await sendPhoto(selected, uploadId, currentTask, (value) => {
+          $('progress').value = value;
+          $('progress-text').textContent = value < 100 ? `Foto wird übertragen: ${value} %` : 'Foto wird gespeichert …';
+        });
+        if (result.created && currentUser?.values) {
+          showUser({ ...currentUser, values: { ...currentUser.values, photos_uploaded: (currentUser.values.photos_uploaded || 0) + 1 } });
+          void setOfflineState('user', currentUser);
+        }
+        lastQueuedId = null;
+        clearSelection();
+        clearChallenge(false);
+        $('challenge').hidden = true;
+        $('free-divider').hidden = true;
+        $('pick-actions').hidden = true;
+        $('success').hidden = false;
+        setSuccessStatus('Geteilt', '✓');
+        $('another').focus();
+      } catch (uploadError) {
+        $('upload-error').textContent = uploadError.message;
+        $('progress-wrap').hidden = true;
+        $('send').disabled = false;
+        $('send').textContent = 'Erneut hochladen ↑';
+      }
+    } else {
+      $('upload-error').textContent = error.message;
+      $('send').disabled = false;
+      $('send').textContent = 'Erneut speichern ↑';
+    }
   } finally {
     uploading = false;
     $('discard').disabled = $('logout').disabled = false;
   }
 });
 
-window.addEventListener('beforeunload', (event) => {
-  if (uploading) { event.preventDefault(); event.returnValue = ''; }
-});
 window.addEventListener('pagehide', () => stopCamera(false));
 
 const REACTION_EMOJIS = ['❤️', '😂', '😍', '👏', '🔥'];
@@ -1754,6 +2282,7 @@ $('gallery-search').addEventListener('input', () => {
 document.addEventListener('visibilitychange', () => {
   clearTimeout(timer);
   if (!document.hidden && galleryPage && authenticated) loadGallery(false);
+  if (!document.hidden && authenticated) scheduleQueueSync();
   // Position comes from the clock, so a tab that was away simply rejoins the
   // stream exactly where every other screen already is.
   if (streamPage && authenticated) {
@@ -1762,18 +2291,63 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+window.addEventListener('online', () => {
+  offlineMode = false;
+  updateSendAction();
+  if (authenticated && !locallySignedOut) {
+    void refreshTaskCache().catch(() => {});
+    scheduleQueueSync();
+  }
+});
+
+window.addEventListener('offline', () => {
+  offlineMode = true;
+  updateSendAction();
+});
+
+if (!document.querySelector('script[src="/static/dev-reload.js"]') && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data?.type === 'fotovibe-outbox-updated') void refreshOutbox();
+  });
+}
+
+let cachedOfflineUser = null;
 try {
-  const activeSession = await api('/api/session');
-  await enter(activeSession.user);
-} catch (error) {
+  await openOfflineStore();
+  await resetInterruptedUploads();
+  locallySignedOut = Boolean(await getOfflineState('signed-out'));
+  cachedOfflineUser = await getOfflineState('user');
+  const taskState = await getOfflineState('tasks');
+  cachedTasks = Array.isArray(taskState?.tasks) ? taskState.tasks.filter((task) => task?.task_token) : [];
+  taskBag = Array.isArray(taskState?.bag) ? taskState.bag.filter((id) => cachedTasks.some((task) => task.id === id)) : [];
+  lastDrawnTaskId = cachedTasks.some((task) => task.id === taskState?.lastDrawnTaskId) ? taskState.lastDrawnTaskId : null;
+  await refreshOutbox();
+} catch {
+  // Direct upload remains available if a browser refuses IndexedDB.
+}
+
+if (locallySignedOut) {
+  showLogin();
+} else {
   try {
-    const restored = await api('/api/session/restore', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_id: deviceId() }),
-    });
-    await enter(restored.user);
-  } catch (restoreError) {
-    showLogin(error.message === 'Bitte den Party-Code eingeben.' ? '' : error.message);
+    const activeSession = await api('/api/session');
+    await enter(activeSession.user);
+  } catch (error) {
+    if (error.network && cachedOfflineUser) {
+      await enter(cachedOfflineUser, { offline: true });
+    } else {
+      try {
+        const restored = await api('/api/session/restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: deviceId() }),
+        });
+        await enter(restored.user);
+      } catch (restoreError) {
+        if (restoreError.network && cachedOfflineUser) await enter(cachedOfflineUser, { offline: true });
+        else showLogin(error.status === 401 ? '' : error.message);
+      }
+    }
   }
 }

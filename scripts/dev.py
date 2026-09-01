@@ -83,6 +83,7 @@ def snapshot():
 def start_server(host, port):
     environment = os.environ.copy()
     environment["FOTOVIBE_DEV"] = "1"
+    environment["FOTOVIBE_HOT_RELOAD"] = "1"
     return subprocess.Popen(
         [
             sys.executable,

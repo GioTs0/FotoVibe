@@ -177,6 +177,7 @@ class Settings:
     secure_cookies: bool = True
     test_codes: tuple[str, ...] = ()
     admin_device_ids: tuple[str, ...] = DEFAULT_ADMIN_DEVICE_IDS
+    task_snapshot_key: str | None = None
 
     @classmethod
     def from_env(cls):
@@ -194,12 +195,16 @@ class Settings:
                 for device_id in admin_device_ids
             ):
                 raise RuntimeError("admin_device_ids in AUTH_SECRET_FILE must be a list of device IDs")
+            task_snapshot_key = values.get("task_snapshot_key", values["session_key"])
+            if not isinstance(task_snapshot_key, str) or not task_snapshot_key:
+                raise RuntimeError("task_snapshot_key in AUTH_SECRET_FILE must be a non-empty string")
             return cls(
                 values["party_code"],
                 values["session_key"],
                 True,
                 tuple(test_codes),
                 tuple(admin_device_ids),
+                task_snapshot_key,
             )
         if os.environ.get("FOTOVIBE_DEV") == "1":
             return cls(
@@ -208,6 +213,7 @@ class Settings:
                 False,
                 ("1234",),
                 DEFAULT_ADMIN_DEVICE_IDS,
+                "development-only-task-snapshot-key",
             )
         raise RuntimeError("AUTH_SECRET_FILE is required outside explicit local development")
 
@@ -325,6 +331,10 @@ def create_app(settings=None, store=None, task_store=None):
     app.add_middleware(SecurityMiddleware, secure=settings.secure_cookies)
     serializer = URLSafeTimedSerializer(settings.session_key, salt="fotovibe-session")
     cursors = URLSafeTimedSerializer(settings.session_key, salt="fotovibe-pages")
+    task_snapshots = URLSafeTimedSerializer(
+        settings.task_snapshot_key or settings.session_key,
+        salt="fotovibe-task-snapshot",
+    )
     code = normalized(settings.party_code)
     accepted_codes = tuple(
         dict.fromkeys([code, *(normalized(value) for value in settings.test_codes)])
@@ -467,7 +477,22 @@ def create_app(settings=None, store=None, task_store=None):
             raise HTTPException(400, "Ungültige Foto-ID.") from None
         return value
 
-    def resolve_task(task_id):
+    def task_snapshot(task):
+        """Sign the wording shown to a guest for delayed, offline uploads."""
+        return task_snapshots.dumps({"id": task["id"], "text": task["text"]})
+
+    def resolve_task(task_id=None, task_token=None):
+        if task_token is not None:
+            if task_id is not None or not isinstance(task_token, str):
+                raise HTTPException(400, "Die Foto-Aufgabe ist ungültig.")
+            try:
+                payload = task_snapshots.loads(task_token)
+            except BadSignature:
+                raise HTTPException(400, "Die gespeicherte Foto-Aufgabe ist ungültig.") from None
+            task = normalize_task(payload.get("id"), payload.get("text")) if isinstance(payload, dict) else None
+            if task is None:
+                raise HTTPException(400, "Die gespeicherte Foto-Aufgabe ist ungültig.")
+            return task
         if task_id is None:
             return None
         if not isinstance(task_id, str) or not re.fullmatch(r"[a-z0-9-]{1,100}", task_id):
@@ -808,9 +833,26 @@ def create_app(settings=None, store=None, task_store=None):
     def page():
         if not settings.secure_cookies:
             html = (ROOT / "static/index.html").read_text()
-            html = html.replace("</body>", '<script src="/static/dev-reload.js"></script>\n</body>')
+            if os.environ.get("FOTOVIBE_HOT_RELOAD") == "1":
+                html = html.replace("</body>", '<script src="/static/dev-reload.js"></script>\n</body>')
             return HTMLResponse(html)
         return FileResponse(ROOT / "static/index.html")
+
+    @app.get("/service-worker.js")
+    def service_worker():
+        return FileResponse(
+            ROOT / "static/service-worker.js",
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+        )
+
+    @app.get("/manifest.webmanifest")
+    def web_manifest():
+        return FileResponse(
+            ROOT / "static/manifest.webmanifest",
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     if not settings.secure_cookies:
 
@@ -842,6 +884,18 @@ def create_app(settings=None, store=None, task_store=None):
         if not choices:
             raise HTTPException(503, "Gerade ist keine Foto-Aufgabe verfügbar.")
         return secrets.choice(choices)
+
+    @app.get("/api/tasks")
+    def offline_tasks(request: Request):
+        """Return all active tasks, including a tamper-proof delayed-upload snapshot."""
+        sid = session(request)
+        limiter.check("tasks:" + sid, 30)
+        return {
+            "tasks": [
+                {**task, "task_token": task_snapshot(task)}
+                for task in task_store.enabled()
+            ]
+        }
 
     def task_text_from_request(payload):
         text = payload.get("text") if isinstance(payload, dict) else None
@@ -1245,12 +1299,15 @@ def create_app(settings=None, store=None, task_store=None):
         data = session_data(request)
         sid = data["sid"]
         limiter.check("upload:" + sid, 10)
-        async with request.form(max_files=1, max_fields=2, max_part_size=1024) as form:
+        async with request.form(max_files=1, max_fields=2, max_part_size=8192) as form:
             photo = form.get("photo")
             photo_id = valid_id(form.get("upload_id"))
             task_id = form.get("task_id")
+            task_token = form.get("task_token")
             expected_fields = {"photo", "upload_id"} | (
                 {"task_id"} if task_id is not None else set()
+            ) | (
+                {"task_token"} if task_token is not None else set()
             )
             if (
                 not isinstance(photo, UploadFile)
@@ -1258,7 +1315,7 @@ def create_app(settings=None, store=None, task_store=None):
                 or set(form.keys()) != expected_fields
             ):
                 raise HTTPException(400, "Bitte genau ein Foto auswählen.")
-            task = await run_in_threadpool(resolve_task, task_id)
+            task = await run_in_threadpool(resolve_task, task_id, task_token)
             raw = await photo.read(MAX_BYTES + 1)
             if not raw:
                 raise HTTPException(400, "Die Datei ist leer.")

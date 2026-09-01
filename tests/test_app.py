@@ -94,10 +94,12 @@ def login_device(client, device_id):
     return response
 
 
-def upload(client, data=None, photo_id=None, task_id=None):
+def upload(client, data=None, photo_id=None, task_id=None, task_token=None):
     fields = {"upload_id": photo_id or str(uuid.uuid4())}
     if task_id is not None:
         fields["task_id"] = task_id
+    if task_token is not None:
+        fields["task_token"] = task_token
     return client.post(
         "/api/photos",
         headers=ORIGIN,
@@ -585,6 +587,63 @@ def test_random_task_handles_empty_store(tmp_path):
     assert response.json()["detail"] == "Gerade ist keine Foto-Aufgabe verfügbar."
 
 
+def test_offline_task_tokens_keep_the_drawn_wording_after_task_changes(tmp_path):
+    tasks = MutableTestTaskStore(
+        [{"id": "damals", "text": "Mach ein Foto mit Hut.", "enabled": True}]
+    )
+    store = LocalStore(tmp_path)
+    client = TestClient(
+        create_app(Settings("TEST-CODE", "test-signing-key"), store, tasks),
+        base_url="https://testserver",
+    )
+    login(client)
+
+    listed = client.get("/api/tasks")
+    assert listed.status_code == 200
+    task = listed.json()["tasks"][0]
+    assert task["id"] == "damals"
+    assert task["task_token"]
+
+    tasks.upsert("damals", "Mach ein Foto mit Sonnenbrille.")
+    response = upload(client, task_token=task["task_token"])
+    assert response.status_code == 201
+    assert response.json()["metadata"] == {
+        "task": {"id": "damals", "text": "Mach ein Foto mit Hut."}
+    }
+
+    tampered = ("a" if task["task_token"][0] != "a" else "b") + task["task_token"][1:]
+    assert upload(client, task_token=tampered).status_code == 400
+    assert upload(client, task_id="damals", task_token=task["task_token"]).status_code == 400
+
+
+def test_task_snapshot_key_survives_party_code_rotation(tmp_path):
+    tasks = TestTaskStore([{"id": "abend", "text": "Ein gemeinsames Foto."}])
+    store = LocalStore(tmp_path)
+    first = TestClient(
+        create_app(
+            Settings("TEST-CODE", "old-session-key", task_snapshot_key="stable-task-key"),
+            store,
+            tasks,
+        ),
+        base_url="https://testserver",
+    )
+    login(first)
+    token = first.get("/api/tasks").json()["tasks"][0]["task_token"]
+
+    rotated = TestClient(
+        create_app(
+            Settings("NEW-CODE", "new-session-key", task_snapshot_key="stable-task-key"),
+            store,
+            TestTaskStore([]),
+        ),
+        base_url="https://testserver",
+    )
+    assert rotated.post(
+        "/api/session", json={"code": "new code"}, headers=ORIGIN
+    ).status_code == 200
+    assert upload(rotated, task_token=token).status_code == 201
+
+
 def test_task_snapshot_is_stored_with_photo_and_listed(env):
     client, _, store = env
     login(client)
@@ -751,5 +810,10 @@ def test_security_headers_and_missing_photos(env):
     assert response.headers["x-frame-options"] == "DENY"
     assert "script-src 'self'" in response.headers["content-security-policy"]
     assert response.headers["cache-control"] == "no-store"
+    worker = client.get("/service-worker.js")
+    assert worker.status_code == 200
+    assert worker.headers["service-worker-allowed"] == "/"
+    assert worker.headers["cache-control"] == "no-cache"
+    assert client.get("/manifest.webmanifest").status_code == 200
     login(client)
     assert client.get(f"/api/photos/{uuid.uuid4()}/original").status_code == 404

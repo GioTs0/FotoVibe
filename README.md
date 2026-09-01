@@ -151,6 +151,22 @@ oder der Zugriff nicht möglich ist, bietet die Oberfläche zusätzlich den nati
 Kamera-/Dateidialog an. Kamerazugriff funktioniert außerhalb von `localhost` nur
 über HTTPS.
 
+## Offline-Aufnahmen
+
+Nach einer erfolgreichen Anmeldung ist die Aufnahme auch bei vorübergehend
+fehlendem Netz verfügbar. Die App lädt dafür Aufgaben vor und speichert jede
+bestätigte Aufnahme zunächst unverändert in der lokalen Browser-Datenbank. Der
+kleine Wolken-Button in der Kopfzeile zeigt an, ob Fotos warten, übertragen
+werden oder eine Anmeldung benötigen; dort lassen sich fehlgeschlagene Einträge
+erneut versuchen oder lokal löschen. Die Übertragung läuft einzeln weiter, sobald
+die App wieder Netz hat oder erneut geöffnet wird. Browser mit Background Sync
+können zusätzlich im Hintergrund fortsetzen.
+
+Es werden höchstens 25 Fotos beziehungsweise 250 MiB lokal vorgemerkt und stets
+20 MiB Speicherreserve freigehalten. Fotos werden erst nach einer erfolgreichen
+Serverantwort gelöscht. Bei einer Abmeldung können wartende Fotos behalten oder
+gelöscht werden. Ein erster Beitritt zur Party braucht weiterhin Internet.
+
 ## Foto-Aufgaben verwalten
 
 Die zehn Ausgangsaufgaben stehen in `infra/tasks.json`. Beim Deployment werden
@@ -179,10 +195,12 @@ bestehenden Dokuments. `disable` behält den Eintrag, zeigt ihn Gästen aber nic
 mehr an. Schlüssel bestehen aus Kleinbuchstaben, Ziffern und Bindestrichen; Texte
 sind auf 500 Zeichen begrenzt.
 
-Wird ein Foto über eine Aufgabe aufgenommen, sendet der Browser nur den
-Aufgabenschlüssel. Das Backend löst ihn gegen die aktive Firestore-Aufgabe auf und
-speichert Schlüssel und aktuellen Text als Momentaufnahme im Foto-Datensatz. Eine
-spätere Änderung oder Deaktivierung der Aufgabe verändert ältere Fotos daher nicht.
+Wird ein Foto über eine Aufgabe aufgenommen, erhält der Browser beim Vorladen ein
+signiertes Aufgaben-Snapshot-Token. Dieses bindet Aufgabenschlüssel und den damals
+sichtbaren Wortlaut, sodass eine offline gezogene Aufgabe auch nach einer späteren
+Änderung oder Deaktivierung gültig bleibt. Der Foto-Datensatz enthält weiterhin
+nur Schlüssel und Text; das Token wird nie veröffentlicht. Ältere Clients dürfen
+weiterhin den Aufgabenschlüssel direkt senden.
 
 ## Party-Code anzeigen oder wechseln
 

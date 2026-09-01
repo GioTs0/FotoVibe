@@ -326,9 +326,18 @@ def main():
     if found is None or args.rotate_code:
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         code = "".join(secrets.choice(alphabet) for _ in range(10))
+        previous = {}
+        if found is not None:
+            previous = json.loads(
+                gc("secrets", "versions", "access", secret_version(), f"--secret={AUTH_SECRET}")
+            )
+        snapshot_key = previous.get("task_snapshot_key")
+        if not isinstance(snapshot_key, str) or not snapshot_key:
+            snapshot_key = secrets.token_urlsafe(48)
         values = {
             "party_code": code[:5] + "-" + code[5:],
             "session_key": secrets.token_urlsafe(48),
+            "task_snapshot_key": snapshot_key,
             "test_codes": [TEST_CODE],
             "admin_device_ids": list(ADMIN_DEVICE_IDS),
         }
@@ -356,6 +365,9 @@ def main():
         ):
             raise RuntimeError("Existing auth secret has invalid test_codes")
         changed = False
+        if not isinstance(values.get("task_snapshot_key"), str) or not values["task_snapshot_key"]:
+            values["task_snapshot_key"] = secrets.token_urlsafe(48)
+            changed = True
         if TEST_CODE not in configured_test_codes:
             values["test_codes"] = [*configured_test_codes, TEST_CODE]
             changed = True
