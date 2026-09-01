@@ -55,6 +55,11 @@ let streamClockOffset = 0;
 const streamSlots = [];
 const streamPhotoById = new Map();
 const streamStageSize = { width: 0, height: 0 };
+// The television at the party is an old one. Rather than guess its budget,
+// the stream watches its own frame rate and drops effects until it keeps up.
+let streamQuality = 0;
+let streamFrames = 0;
+let streamWindowStart = 0;
 const streamReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 $('page-backdrop').hidden = false;
@@ -665,10 +670,19 @@ async function openCamera(facing) {
     await $('camera-video').play();
     $('camera-status').textContent = 'Richte die Kamera aus und löse das Foto aus.';
     $('shutter').disabled = false;
+    // Phones routinely report a single video input even when they have a front
+    // and a rear lens, which hid this button on exactly the devices that need
+    // it. A coarse pointer is taken as evidence of a handheld camera pair, and
+    // switching is safe either way: facingMode is an ideal, so the worst case
+    // is the same lens coming back.
+    const handheld = matchMedia('(pointer: coarse)').matches;
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
-      $('switch-camera').hidden = devices.filter((device) => device.kind === 'videoinput').length < 2;
-    } catch {}
+      const cameras = devices.filter((device) => device.kind === 'videoinput').length;
+      $('switch-camera').hidden = cameras < 2 && !handheld;
+    } catch {
+      $('switch-camera').hidden = !handheld;
+    }
     $('shutter').focus();
   } catch (error) {
     if (generation !== cameraGeneration) return;
@@ -1254,7 +1268,7 @@ function paintStream() {
     // its rasterised copy instead of re-blurring every frame.
     // On the whole card, not just the photo: the frame and its caption have to
     // recede with it, otherwise a distant photo sits in a razor-sharp frame.
-    const blur = Math.round((onScreen / scale) * 4) / 4;
+    const blur = streamQuality ? 0 : Math.round((onScreen / scale) * 4) / 4;
     if (slot.blur !== blur) {
       slot.node.style.filter = blur ? `blur(${blur}px)` : '';
       slot.blur = blur;
@@ -1262,7 +1276,28 @@ function paintStream() {
   }
 }
 
-function streamFrame() {
+function streamAdapt(now) {
+  if (!streamWindowStart) {
+    streamWindowStart = now;
+    return;
+  }
+  streamFrames += 1;
+  const elapsed = now - streamWindowStart;
+  if (elapsed < 2500) return;
+  const fps = (streamFrames * 1000) / elapsed;
+  streamWindowStart = now;
+  streamFrames = 0;
+  if (fps >= 40 || streamQuality >= 2) return;
+  // Softening goes first, because it costs the most and is the least missed;
+  // only if that is not enough does the corridor get shorter.
+  streamQuality += 1;
+  $('stream-stage').classList.toggle('is-lean', streamQuality >= 1);
+  $('stream-stage').classList.toggle('is-minimal', streamQuality >= 2);
+  for (const slot of streamSlots) slot.blur = null;
+}
+
+function streamFrame(now) {
+  streamAdapt(now);
   paintStream();
   streamFrameHandle = requestAnimationFrame(streamFrame);
 }
