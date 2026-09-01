@@ -94,6 +94,8 @@ test('the front-camera preview mirrors only the preview and keeps the action foc
   await expect(page.locator('#shutter')).toBeEnabled();
   await page.locator('#shutter').click();
   await expect(page.locator('#preview')).toHaveClass(/is-mirrored/);
+  await expect(page.locator('#discard')).toHaveText('');
+  await expect(page.locator('#discard')).toHaveAttribute('aria-label', 'Zurück zur Kamera');
   await expect(page.locator('#file-info')).toHaveCount(0);
   await expect(page.locator('#preview-status')).toHaveCount(0);
   const centered = await page.locator('#send').evaluate((element) => {

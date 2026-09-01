@@ -1352,7 +1352,6 @@ function showReviewShell() {
   syncTaskOverlay('active-task', 'active-task-text', 'preview-task-restore');
   const returnsToCamera = selectionSource === 'camera';
   $('discard').setAttribute('aria-label', returnsToCamera ? 'Zurück zur Kamera' : 'Vorschau schließen');
-  $('discard-label').textContent = returnsToCamera ? 'Zur Kamera' : 'Schließen';
 }
 
 function decodeImage(url) {

@@ -11,4 +11,28 @@ artifacts
 tests
 .env
 .DS_Store
+test-results
+playwright-report
+blob-report
+coverage
+htmlcov
+.coverage
+.mypy_cache
 
+# Local documentation and developer tooling are not copied by the Dockerfile.
+README.md
+PRODUCT.md
+DESIGN.md
+DEPENDENCY_SOURCES.md
+Makefile
+playwright.config.mjs
+.dockerignore
+.gitignore
+infra/artifact-cleanup.json
+infra/source-lifecycle.json
+scripts/deploy.py
+scripts/dev.py
+scripts/manage_tasks.py
+scripts/setup-tests.mjs
+scripts/smoke.py
+scripts/test-server.mjs
