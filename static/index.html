@@ -143,8 +143,10 @@
     <section id="gallery" class="gallery" hidden aria-labelledby="gallery-title">
       <div id="gallery-overview">
         <div class="gallery-heading"><div><p class="eyebrow">Aus euren Perspektiven</p><h1 id="gallery-title">Unser Abend in Bildern.</h1></div><div class="gallery-actions"><a id="stream-link" class="button primary" href="/stream">Stream starten <span aria-hidden="true">▶</span></a><button id="refresh" class="secondary" type="button">Aktualisieren</button></div></div>
-        <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen" aria-describedby="gallery-search-hint"><small id="gallery-search-hint">Findet auch ähnliche Schreibweisen.</small></label>
-        <p class="muted" id="gallery-status" role="status">Die Fotos werden geladen …</p>
+        <div class="gallery-toolbar">
+          <label class="gallery-search" for="gallery-search"><span>Fotos durchsuchen</span><input id="gallery-search" type="search" autocomplete="off" placeholder="Name oder Foto-Aufgabe suchen" aria-describedby="gallery-search-hint"><small id="gallery-search-hint">Findet auch ähnliche Schreibweisen.</small></label>
+          <p class="muted" id="gallery-status" role="status">Die Fotos werden geladen …</p>
+        </div>
         <p id="gallery-error" class="error" role="alert"></p>
         <div id="gallery-empty" class="empty" hidden><h2>Der erste Moment fehlt noch.</h2><p>Mach den Anfang und teile ein Foto von der Party.</p><a href="/" class="button primary">Erstes Foto teilen</a></div>
         <div id="photo-grid" class="photo-grid"></div>

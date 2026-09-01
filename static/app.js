@@ -1436,8 +1436,14 @@ document.addEventListener('fullscreenchange', () => {
   $('stream-fullscreen').textContent = document.fullscreenElement ? 'Vollbild beenden' : 'Vollbild';
   // Fullscreen covers the backdrop completely, so stop paying for its filter
   // while the stream needs every frame it can get.
-  $('page-backdrop').hidden = Boolean(document.fullscreenElement);
-  if (document.fullscreenElement) revealStreamControls();
+  const inFullscreen = Boolean(document.fullscreenElement);
+  $('page-backdrop').hidden = inFullscreen;
+  // The layout is driven by a plain class as well as :fullscreen. The selector
+  // is well supported, but a television showing a half-laid-out page all
+  // evening is not a failure worth risking for one selector.
+  document.body.classList.toggle('is-fullscreen', inFullscreen);
+  document.body.classList.toggle('tv-mode', tvMode || inFullscreen);
+  if (inFullscreen) revealStreamControls();
   else $('stream-stage').classList.remove('controls-visible');
   if (streamPage) measureStreamStage();
 });
