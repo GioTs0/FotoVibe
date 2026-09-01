@@ -1379,7 +1379,7 @@ async function loadStream() {
 $('stream-fullscreen').addEventListener('click', async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
-    else await $('stream-stage').requestFullscreen();
+    else await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
   } catch { $('stream-error').textContent = 'Dieser Browser hat den Vollbildmodus abgelehnt.'; }
 });
 
