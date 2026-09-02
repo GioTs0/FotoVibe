@@ -727,24 +727,25 @@ def create_app(settings=None, store=None, task_store=None):
                     log.warning("invalid_hidden_photo_marker object=%s", obj.name)
         return hidden
 
-    def pinned_photo_ids():
-        """Photos an admin put on the stream by hand, as the latest pin event.
+    def switched_on_photo_ids(prefix, kind):
+        """Photos whose latest admin switch of this kind is on.
 
-        Pins come and go during an evening, and the object store never mutates,
-        so each click appends an event and the newest one for a photo wins. The
-        state rides in the object metadata, the way reactions do, which keeps
-        this to a single listing instead of a read per pin.
+        Both switches an admin has over the stream -- pinning a photo and taking
+        one off the wall -- come and go during an evening, and the object store
+        never mutates, so each click appends an event and the newest one for a
+        photo wins. The state rides in the object metadata, the way reactions do,
+        which keeps this to a single listing instead of a read per event.
         """
         latest = {}
-        for obj in store.list_prefix("pins/"):
+        for obj in store.list_prefix(f"{prefix}/"):
             metadata = obj.metadata or {}
             photo_id = metadata.get("photo_id")
-            if metadata.get("kind") != "pin" or not isinstance(photo_id, str):
+            if metadata.get("kind") != kind or not isinstance(photo_id, str):
                 continue
             try:
                 valid_id(photo_id)
             except HTTPException:
-                log.warning("invalid_pin_marker object=%s", obj.name)
+                log.warning("invalid_%s_marker object=%s", kind, obj.name)
                 continue
             recorded_at = metadata.get("recorded_at")
             recorded_at = recorded_at if isinstance(recorded_at, str) else obj.created
@@ -754,11 +755,19 @@ def create_app(settings=None, store=None, task_store=None):
                 latest[photo_id] = ((recorded_at, obj.name), active)
         return {photo_id for photo_id, (_, active) in latest.items() if active}
 
+    def pinned_photo_ids():
+        return switched_on_photo_ids("pins", "pin")
+
+    def off_stream_photo_ids():
+        """Photos an admin took off the wall. They stay in the gallery."""
+        return switched_on_photo_ids("stream_hidden", "stream_hidden")
+
     def gallery_entries(include_hidden=False):
         """Build the gallery index, including task metadata from the bucket."""
         entries = []
         hidden_ids = hidden_photo_ids()
         pinned_ids = pinned_photo_ids()
+        off_stream_ids = off_stream_photo_ids()
         social = interaction_summaries()
         for obj in store.published():
             photo_id = Path(obj.name).stem
@@ -809,6 +818,7 @@ def create_app(settings=None, store=None, task_store=None):
             if include_hidden:
                 entry["hidden"] = photo_id in hidden_ids
             entry["pinned"] = photo_id in pinned_ids
+            entry["in_stream"] = photo_id not in off_stream_ids
             entry["interactions"] = public_interactions(social.get(photo_id))
             entries.append(entry)
         entries.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
@@ -869,6 +879,25 @@ def create_app(settings=None, store=None, task_store=None):
             "device_id": "d_" + device[:12],
             "values": {"photos_uploaded": photos_uploaded},
             "is_admin": is_admin(device, role_states),
+        }
+
+    def stream_photo(entry):
+        """The compact shape a screen needs to show and rank one photo.
+
+        Only what the caption under a photo needs, plus the two counts the
+        screens rank on. They poll this list continuously, so it stays lean even
+        late in a party with several hundred photos.
+        """
+        interactions = entry.get("interactions") or {}
+        return {
+            "id": entry["id"],
+            "created_at": entry["created_at"],
+            "task": (entry.get("task") or {}).get("text"),
+            "author": (entry.get("author") or {}).get("name"),
+            "reactions": interactions.get("reactions", []),
+            "comments": interactions.get("comments_count", 0),
+            "pinned": bool(entry.get("pinned")),
+            "in_stream": bool(entry.get("in_stream", True)),
         }
 
     def require_admin(request):
@@ -1291,6 +1320,58 @@ def create_app(settings=None, store=None, task_store=None):
             cache["until"] = 0
         return {"id": photo_id, "pinned": pinned}
 
+    @app.post("/api/admin/photos/{photo_id}/stream")
+    async def set_photo_on_stream(request: Request, photo_id: str):
+        """Take a photo off the wall, or put it back. It stays in the gallery."""
+        data = require_admin(request)
+        valid_id(photo_id)
+        manifest(photo_id)
+        try:
+            payload = await request.json()
+            shown = payload.get("shown", True)
+            if not isinstance(shown, bool):
+                raise TypeError
+        except (AttributeError, TypeError, ValueError):
+            raise HTTPException(400, "Bitte gib an, ob das Foto im Stream laufen soll.") from None
+        recorded_at = datetime.now(UTC).isoformat()
+        store.put(
+            f"stream_hidden/{photo_id}/{uuid.uuid4()}.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "photo_id": photo_id,
+                    "in_stream": shown,
+                    "changed_by": "d_" + data["device"][:12],
+                    "recorded_at": recorded_at,
+                },
+                separators=(",", ":"),
+            ).encode(),
+            "application/json",
+            {
+                "kind": "stream_hidden",
+                "photo_id": photo_id,
+                "active": "0" if shown else "1",
+                "recorded_at": recorded_at,
+            },
+        )
+        with cache_lock:
+            cache["until"] = 0
+        return {"id": photo_id, "in_stream": shown}
+
+    @app.get("/api/admin/photos")
+    def admin_photos(request: Request):
+        """Every gallery photo with the two switches an admin has over the wall.
+
+        The wall's own list leaves out whatever was taken off it, so the panel
+        cannot use it: an admin has to see a photo in order to put it back.
+        """
+        require_admin(request)
+        with cache_lock:
+            if cache["until"] <= time.monotonic():
+                cache.update(photos=gallery_entries(), until=time.monotonic() + 5)
+            entries = cache["photos"]
+        return {"photos": [stream_photo(entry) for entry in entries]}
+
     @app.get("/api/photos/{photo_id}/interactions")
     def photo_interactions(request: Request, photo_id: str):
         data = session_data(request)
@@ -1601,21 +1682,7 @@ def create_app(settings=None, store=None, task_store=None):
             entries = cache["photos"]
         return {
             "photos": [
-                {
-                    "id": entry["id"],
-                    "created_at": entry["created_at"],
-                    # Only what the caption under a photo needs. The screens poll
-                    # this list continuously, so it stays lean even late in a
-                    # party with several hundred photos.
-                    "task": (entry.get("task") or {}).get("text"),
-                    "author": (entry.get("author") or {}).get("name"),
-                    "reactions": (entry.get("interactions") or {}).get("reactions", []),
-                    # The screens rank the evening's most celebrated photos
-                    # themselves, so they need the comment count as well.
-                    "comments": (entry.get("interactions") or {}).get("comments_count", 0),
-                    "pinned": bool(entry.get("pinned")),
-                }
-                for entry in entries
+                stream_photo(entry) for entry in entries if entry.get("in_stream", True)
             ],
             "now": datetime.now(UTC).isoformat(),
         }
