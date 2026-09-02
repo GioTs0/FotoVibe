@@ -45,6 +45,43 @@ REACTIONS = {
     "fire": "🔥",
 }
 COMMENT_MAX_LENGTH = 500
+# What makes a photo hot. A written comment took more effort than a tap, so it
+# counts double. One hot photo per ten, capped, so it stays an honour rather
+# than every third picture on the wall. Resolved here and nowhere else: the
+# television, the admin panel and the gallery search all read the answer.
+HOT_COMMENT_WEIGHT = 2
+HOT_EVERY = 10
+HOT_AUTOMATIC_MAX = 8
+
+
+def hot_score(entry):
+    interactions = entry.get("interactions") or {}
+    reactions = sum(item.get("count", 0) for item in interactions.get("reactions", []))
+    return reactions + HOT_COMMENT_WEIGHT * interactions.get("comments_count", 0)
+
+
+def resolve_hot(entries):
+    """Which photos are hot, from the admins' rulings and the party's reactions.
+
+    An admin's ruling wins in both directions: a photo they called hot is always
+    in, one they ruled out is always out, however popular it gets. Everything
+    else is ranked on reactions, and the best of them fill a bounded number of
+    places. Hand-picked photos come on top of that count rather than pushing a
+    celebrated one out -- an admin adding a favourite did not ask to lose one.
+    """
+    on_wall = [entry for entry in entries if entry.get("in_stream", True)]
+    chosen = {entry["id"] for entry in on_wall if entry.get("hot_ruling") is True}
+    rated = [
+        entry
+        for entry in on_wall
+        if entry.get("hot_ruling") is None and hot_score(entry) > 0
+    ]
+    # Ties broken on values, never on arrival order, so every screen agrees.
+    # Sorting is stable, so the first pass settles the ties the second leaves.
+    rated.sort(key=lambda entry: entry["id"])
+    rated.sort(key=lambda entry: (hot_score(entry), entry["created_at"]), reverse=True)
+    wanted = min(HOT_AUTOMATIC_MAX, max(1, round(len(on_wall) / HOT_EVERY)))
+    return chosen | {entry["id"] for entry in rated[:wanted]}
 log = logging.getLogger("fotovibe")
 
 
@@ -829,11 +866,14 @@ def create_app(settings=None, store=None, task_store=None):
                 entry["author"] = author
             if include_hidden:
                 entry["hidden"] = photo_id in hidden_ids
-            entry["hot"] = hot_ruling.get(photo_id)
+            entry["hot_ruling"] = hot_ruling.get(photo_id)
             entry["in_stream"] = photo_id not in off_stream_ids
             entry["interactions"] = public_interactions(social.get(photo_id))
             entries.append(entry)
         entries.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
+        hot_ids = resolve_hot(entries)
+        for entry in entries:
+            entry["hot"] = entry["id"] in hot_ids
         return entries
 
     def marker_payload(photo_id):
@@ -1674,6 +1714,9 @@ def create_app(settings=None, store=None, task_store=None):
                         for value in [
                             (photo.get("author") or {}).get("name", ""),
                             (photo.get("task") or {}).get("text", ""),
+                            # Searching for "hot" is how a guest finds the ones
+                            # the wall is celebrating.
+                            "hot" if photo.get("hot") else "",
                         ]
                         if isinstance(value, str)
                     ),

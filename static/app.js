@@ -102,8 +102,6 @@ const STREAM_GOLDEN_ANGLE = 2.399963229728653; // 137.5 degrees, in radians
 const STREAM_SHARP_SLOTS = 4; // nearest slots that load the full-size photo
 const STREAM_SHARP_REACH = 2; // spacings over which the sharp copy fades in
 const STREAM_HIGHLIGHT_EVERY = 10; // ordinary photos between two highlights
-const STREAM_HIGHLIGHT_MAX = 8; // widest highlight rotation, so it stays special
-const STREAM_COMMENT_WEIGHT = 2; // a written comment counts for more than a tap
 let streamTimer = null;
 let streamFrameHandle = null;
 let streamPollTimer = null;
@@ -1338,21 +1336,6 @@ async function loadAdminTasks() {
   }
 }
 
-/** The gallery entry as the wall sees it, so both rank photos identically. */
-function streamShapeOf(entry) {
-  const interactions = entry.interactions || {};
-  return {
-    id: entry.id,
-    created_at: entry.created_at,
-    task: (entry.task || {}).text,
-    author: (entry.author || {}).name,
-    reactions: interactions.reactions || [],
-    comments: interactions.comments_count || 0,
-    hot: entry.hot,
-    in_stream: entry.in_stream !== false,
-  };
-}
-
 // Every tile stays reachable after it is drawn, so a click can relight it where
 // it sits instead of rebuilding the grid. Rebuilding would re-sort, and a photo
 // jumping away from under the finger that just tapped it is the opposite of
@@ -1373,12 +1356,15 @@ function adminGridTile(photo) {
   hot.className = 'tile-action';
   hot.textContent = '🔥 Hot';
   hot.addEventListener('click', async () => {
-    // The current set matters: a photo can be hot on the party's votes alone,
-    // and pressing the lamp then has to turn it off, not on.
-    const wasHot = adminPhotoIsHot(photo, adminHotIds());
-    const now = await setPhotoHot(photo.id, !wasHot, hot, $('admin-stream-status'));
-    photo.hot = now;
+    // The lamp already says what the wall is doing, votes included, so the
+    // press simply asks for the opposite. The lamp flips at once and the list
+    // is refreshed behind it, because one ruling can change another photo's
+    // standing.
+    const wanted = !photo.hot;
+    photo.hot = wanted;
     refreshAdminStream();
+    await setPhotoHot(photo.id, wanted, hot, $('admin-stream-status'));
+    await reconcileAdminStream();
   });
 
   const hide = document.createElement('button');
@@ -1387,9 +1373,10 @@ function adminGridTile(photo) {
   hide.textContent = 'Verstecken';
   hide.addEventListener('click', async () => {
     const onWall = photo.in_stream !== false;
-    const now = await setPhotoOnStream(photo.id, !onWall, hide, $('admin-stream-status'));
-    photo.in_stream = now;
+    photo.in_stream = !onWall;
     refreshAdminStream();
+    await setPhotoOnStream(photo.id, !onWall, hide, $('admin-stream-status'));
+    await reconcileAdminStream();
   });
 
   actions.append(hot, hide);
@@ -1398,29 +1385,33 @@ function adminGridTile(photo) {
   return tile;
 }
 
-/** Whether this photo is hot right now: an admin's ruling if there is one, and
- *  otherwise whatever the party's reactions currently say. */
-function adminPhotoIsHot(photo, hotIds) {
-  if (photo.hot === true || photo.hot === false) return photo.hot;
-  // A photo that is off the wall cannot be hot on it, and its votes say nothing
-  // about a rotation it is not in.
-  if (photo.in_stream === false) return false;
-  return Boolean(hotIds && hotIds.has(photo.id));
-}
-
-/** The photos the wall is treating as hot right now, from the list in memory. */
-function adminHotIds() {
-  const running = adminStreamPhotos.filter((photo) => photo.in_stream !== false);
-  return new Set(streamHighlights(running.map(streamShapeOf)).map((photo) => photo.id));
+/** Fetch the settled answer and relight, without touching the grid itself.
+ *  One ruling can change another photo's standing -- a hand-picked hot photo
+ *  adds to the count, and taking one off the wall frees a place -- so the list
+ *  is refreshed after every action. Only the lamps move; the tiles do not. */
+async function reconcileAdminStream() {
+  if (!currentUser?.is_admin) return;
+  try {
+    const result = await api('/api/admin/photos');
+    const fresh = new Map((result.photos || []).map((photo) => [photo.id, photo]));
+    for (const photo of adminStreamPhotos) {
+      const settled = fresh.get(photo.id);
+      if (!settled) continue;
+      photo.hot = settled.hot;
+      photo.in_stream = settled.in_stream;
+    }
+    refreshAdminStream();
+  } catch {
+    // The lamps already show what was asked for; the next open settles them.
+  }
 }
 
 /** Relight every tile and redo the counts from the list already in memory.
  *  Nothing is fetched, nothing is re-sorted, nothing moves. */
 function refreshAdminStream() {
   const running = adminStreamPhotos.filter((photo) => photo.in_stream !== false);
-  const hotIds = adminHotIds();
   for (const { tile, hot, hide, photo, who } of adminTiles.values()) {
-    const isHot = adminPhotoIsHot(photo, hotIds);
+    const isHot = Boolean(photo.hot);
     const onWall = photo.in_stream !== false;
     hot.classList.toggle('is-on', isHot);
     hot.setAttribute('aria-pressed', String(isHot));
@@ -1435,13 +1426,19 @@ function refreshAdminStream() {
   $('admin-stream-summary').hidden = false;
   $('admin-stream-summary').replaceChildren(
     adminMetric('Fotos im Stream', running.length),
-    adminMetric('Hot', hotIds.size),
+    adminMetric('Hot', adminStreamPhotos.filter((photo) => photo.hot).length),
   );
 }
 
 function adminStreamMatches(photo, query) {
   if (!query) return true;
-  const haystack = `${photo.author?.name || ''} ${photo.task?.text || ''}`.toLowerCase();
+  // The same words the gallery search understands, "hot" included.
+  const haystack = [
+    photo.author?.name || '',
+    photo.task?.text || '',
+    photo.hot ? 'hot' : '',
+    photo.in_stream === false ? 'versteckt' : '',
+  ].join(' ').toLowerCase();
   return query.split(/\s+/).every((word) => haystack.includes(word));
 }
 
@@ -2291,37 +2288,14 @@ function photoButton(photo) {
   return button;
 }
 
-function streamScore(photo) {
-  const reactions = (photo.reactions || []).reduce((total, entry) => total + (entry.count || 0), 0);
-  return reactions + STREAM_COMMENT_WEIGHT * (photo.comments || 0);
-}
-
 function streamHighlights(list) {
-  // A photo becomes hot in one of two ways: the party celebrated it, or an admin
-  // said so. Both count the same from here on -- a hand-picked hot photo is
-  // shown as often as a voted one and wears the same frame. An admin's ruling
-  // works in both directions, so one they ruled out stays out however popular it
-  // gets. Ranking needs something to rank, so a photo nobody has reacted to or
-  // commented on never becomes hot on its own, and a gallery with no reactions
-  // at all simply has no hot photos.
-  const chosen = list.filter((photo) => photo.hot === true);
-  const rated = list
-    .filter((photo) => photo.hot === undefined || photo.hot === null)
-    .filter((photo) => streamScore(photo) > 0)
-    .sort((left, right) => streamScore(right) - streamScore(left)
-      // Every screen has to reach the same order from the same list, so the
-      // ties are broken on values rather than on the order they arrived in.
-      || right.created_at.localeCompare(left.created_at)
-      || left.id.localeCompare(right.id));
-  // One highlight per ten photos: ten photos have a single favourite, fifty
-  // have five. Capped, so late in the evening it stays an honour rather than
-  // every third picture.
-  const wanted = Math.min(
-    STREAM_HIGHLIGHT_MAX,
-    Math.max(1, Math.round(list.length / STREAM_HIGHLIGHT_EVERY)),
-  );
-  const hot = rated.slice(0, Math.max(0, wanted - chosen.length));
-  return [...chosen, ...hot].map((photo) => ({ ...photo, highlight: 'hot' }));
+  // The server decides what is hot, from the admins' rulings and the party's
+  // reactions together, and every screen reads the same answer. Doing it here
+  // as well would be a second copy of the rule, free to drift from the one the
+  // gallery search uses.
+  return list
+    .filter((photo) => photo.hot)
+    .map((photo) => ({ ...photo, highlight: 'hot' }));
 }
 
 function streamPlaylistFrom(list) {
