@@ -75,12 +75,12 @@ body.camera-open,body.review-open{overflow:hidden;overscroll-behavior:none}.capt
 
 
 .stream-page{max-width:1240px;margin:auto}.stream-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:1.5rem}.stream-heading h1{max-width:24ch;margin:.45rem 0 .65rem}.stream-actions{display:flex;gap:.6rem;flex-wrap:wrap;justify-content:flex-end}.stream-actions button{white-space:nowrap}.stream-page #stream-status{margin:0}.stream-page #stream-error:empty{display:none}.stream-stage{position:relative;height:min(74dvh,720px);margin:1.7rem 0 1rem;border-radius:24px;overflow:hidden;background:radial-gradient(circle at 50% 42%,oklch(23% .022 86),oklch(9% .006 86) 70%);perspective:1200px;perspective-origin:50% 50%}.stream-track{position:absolute;inset:0;transform-style:preserve-3d}.stream-photo{position:absolute;top:50%;left:50%;width:min(42%,520px);margin:0;padding:.55rem .55rem .5rem;opacity:0;will-change:transform,opacity;backface-visibility:hidden;background:linear-gradient(oklch(17% .014 86 / .93),oklch(10% .009 86 / .96));border-radius:5px}
-/* The hairline sits on its own layer, faded by depth from the animation loop.
-   Drawn on the card itself it would be a one-pixel line squeezed onto a fifth
-   of a screen pixel once perspective shrinks the card, which flickers on and
-   off along the whole edge. Measured on the far cards: the frame twitched in
-   26 per cent of frames when it was drawn at full strength. */
-.stream-edge{position:absolute;inset:0;border:1px solid oklch(74% .12 86 / .5);border-radius:5px;box-shadow:0 0 0 1px oklch(7% .008 86 / .7);pointer-events:none;opacity:0}
+/* A soft dark halo instead of a hairline. A one-pixel gold line lands on a fifth
+   of a screen pixel once perspective has shrunk a far card, and flips on and off
+   as it drifts across the grid: measured, it twitched in a quarter of all
+   frames. A glow has no edge that can fall between pixels, so there is nothing
+   left to flicker, and it still lifts the photo off the background. */
+.stream-edge{position:absolute;inset:0;border-radius:5px;pointer-events:none;box-shadow:0 0 10px 3px oklch(4% .004 86 / .85),0 0 26px 9px oklch(4% .004 86 / .6),0 0 52px 20px oklch(3% .003 86 / .42)}
 .stream-shot{position:relative;display:block}
 .stream-photo img{display:block;width:100%;max-height:min(48dvh,500px);object-fit:contain;background:oklch(8% .008 86)}
 /* The soft copy sits in the flow and gives the card its size; the sharp one is
@@ -95,15 +95,13 @@ body.camera-open,body.review-open{overflow:hidden;overscroll-behavior:none}.capt
    a filter would be re-rasterised on every perspective step and bring the
    flicker straight back. Only rotation and scale animate, both of which the
    compositor handles without repainting. */
-.stream-photo.is-highlight .stream-edge{border-color:oklch(88% .16 80 / .95);box-shadow:0 0 0 1px oklch(32% .1 58 / .85)}
+.stream-photo.is-highlight .stream-edge{box-shadow:none}
 /* The two rings carry no background, so their box-shadows paint only outside the
    card: a warm glow hugging the frame rather than colour wedges showing through
    it. Two different rhythms make it breathe unevenly, the way a flame does. */
 .stream-photo.is-highlight::before,.stream-photo.is-highlight::after{content:"";position:absolute;z-index:-1;inset:0;border-radius:5px;pointer-events:none}
 .stream-photo.is-highlight::before{box-shadow:0 0 7px 1px oklch(86% .19 62 / .9),0 0 19px 4px oklch(78% .2 45 / .55),0 0 40px 11px oklch(70% .19 36 / .3);animation:flame-pulse 1.9s ease-in-out infinite}
 .stream-photo.is-highlight::after{box-shadow:0 0 12px 2px oklch(93% .16 96 / .6),0 0 27px 7px oklch(84% .18 76 / .35);animation:flame-pulse 2.7s ease-in-out infinite reverse}
-.stream-photo.is-pinned::before{box-shadow:0 0 7px 1px oklch(92% .13 94 / .9),0 0 19px 4px oklch(84% .14 86 / .5),0 0 38px 10px oklch(76% .12 88 / .26)}
-.stream-photo.is-pinned::after{box-shadow:0 0 12px 2px oklch(96% .1 100 / .55),0 0 26px 7px oklch(88% .13 90 / .3)}
 @keyframes flame-pulse{0%,100%{opacity:.72;scale:1}50%{opacity:1;scale:1.012}}
 .stream-flag{align-self:flex-start;padding:.14rem .5rem;border-radius:999px;background:oklch(27% .07 60 / .88);border:1px solid oklch(72% .14 76 / .55);color:oklch(93% .09 86);font-size:.72rem;font-weight:640}
 .stream-stage.is-minimal .stream-photo.is-highlight::before,.stream-stage.is-minimal .stream-photo.is-highlight::after{display:none}

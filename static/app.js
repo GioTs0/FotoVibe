@@ -38,7 +38,10 @@ let adminData = null;
 let adminTasks = null;
 let adminTab = 'users';
 let adminSearchTimer = null;
+let adminStreamSearchTimer = null;
 let adminQuery = '';
+let adminStreamQuery = '';
+let adminStreamPhotos = [];
 let nextCursor = null;
 let galleryLoaded = false;
 const photos = new Map();
@@ -98,7 +101,6 @@ const STREAM_GOLDEN_ANGLE = 2.399963229728653; // 137.5 degrees, in radians
 // is faded in over it. Opacity is a compositor property, so nothing repaints.
 const STREAM_SHARP_SLOTS = 4; // nearest slots that load the full-size photo
 const STREAM_SHARP_REACH = 2; // spacings over which the sharp copy fades in
-const STREAM_EDGE_REACH = 3; // spacings over which the gold frame fades away
 const STREAM_HIGHLIGHT_EVERY = 10; // ordinary photos between two highlights
 const STREAM_HIGHLIGHT_MAX = 8; // widest highlight rotation, so it stays special
 const STREAM_COMMENT_WEIGHT = 2; // a written comment counts for more than a tap
@@ -1320,50 +1322,75 @@ async function loadAdminTasks() {
   }
 }
 
+function adminStreamTile(photo, { hot = false, lazy = false } = {}) {
+  const item = document.createElement('figure');
+  item.className = 'admin-photo-preview admin-stream-item';
+  const image = document.createElement('img');
+  image.src = `/api/photos/${photo.id}/thumb`;
+  image.alt = '';
+  image.decoding = 'async';
+  if (lazy) image.loading = 'lazy';
+  const caption = document.createElement('figcaption');
+  const flag = document.createElement('span');
+  flag.className = 'admin-stream-flag';
+  const score = streamScore(photo);
+  flag.textContent = hot
+    ? (photo.pinned ? '🔥 Hot · angepinnt' : '🔥 Hot')
+    : (photo.author || 'Ohne Namen');
+  const detail = document.createElement('span');
+  detail.className = 'admin-stream-detail';
+  detail.textContent = hot
+    ? [photo.author || 'Ohne Namen', `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`].join(' · ')
+    : `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`;
+  caption.append(flag, detail);
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = 'secondary admin-preview-hide';
+  action.textContent = pinLabel(Boolean(photo.pinned));
+  action.setAttribute('aria-pressed', String(Boolean(photo.pinned)));
+  action.addEventListener('click', async () => {
+    await pinPhotoToStream(photo.id, !photo.pinned, action, $('admin-stream-status'));
+    await loadAdminStream();
+  });
+  item.append(image, caption, action);
+  return item;
+}
+
+function adminStreamMatches(photo, query) {
+  if (!query) return true;
+  const haystack = `${photo.author || ''} ${photo.task || ''}`.toLowerCase();
+  return query.split(/\s+/).every((word) => haystack.includes(word));
+}
+
 function renderAdminStream(list) {
-  // Exactly the rotation the wall builds, from the same list and the same
-  // function, so what an admin reads here is what the television shows.
+  // The hot list comes from the same function the wall uses, on the same photo
+  // list, so what an admin reads here is exactly what the television shows.
   const highlights = streamHighlights(list);
-  const container = $('admin-stream-highlights');
-  container.replaceChildren();
-  $('admin-stream-empty').hidden = highlights.length > 0;
+  const pinnedCount = list.filter((photo) => photo.pinned).length;
   $('admin-stream-summary').hidden = false;
   $('admin-stream-summary').replaceChildren(
     adminMetric('Fotos im Stream', list.length),
-    adminMetric('Angepinnt', highlights.filter((photo) => photo.highlight === 'pinned').length),
-    adminMetric('Meistgefeiert', highlights.filter((photo) => photo.highlight === 'hot').length),
+    adminMetric('Gerade hot', highlights.length),
+    adminMetric('Davon angepinnt', pinnedCount),
   );
-  for (const photo of highlights) {
-    const item = document.createElement('figure');
-    item.className = 'admin-photo-preview admin-stream-item';
-    const image = document.createElement('img');
-    image.src = `/api/photos/${photo.id}/thumb`;
-    image.alt = '';
-    image.decoding = 'async';
-    const caption = document.createElement('figcaption');
-    const flag = document.createElement('span');
-    flag.className = 'admin-stream-flag';
-    flag.textContent = photo.highlight === 'pinned' ? '📌 Angepinnt' : '🔥 Meistgefeiert';
-    const detail = document.createElement('span');
-    detail.className = 'admin-stream-detail';
-    const score = streamScore(photo);
-    detail.textContent = [
-      photo.author || 'Ohne Namen',
-      `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`,
-    ].join(' · ');
-    caption.append(flag, detail);
-    const action = document.createElement('button');
-    action.type = 'button';
-    action.className = 'secondary admin-preview-hide';
-    action.textContent = pinLabel(Boolean(photo.pinned));
-    action.setAttribute('aria-pressed', String(Boolean(photo.pinned)));
-    action.addEventListener('click', async () => {
-      await pinPhotoToStream(photo.id, !photo.pinned, action, $('admin-stream-status'));
-      await loadAdminStream();
-    });
-    item.append(image, caption, action);
-    container.append(item);
-  }
+  $('admin-stream-empty').hidden = highlights.length > 0;
+  $('admin-stream-highlights').replaceChildren(
+    ...highlights.map((photo) => adminStreamTile(photo, { hot: true })),
+  );
+
+  // Every photo can be pinned, not only the ones that are already hot: pinning
+  // is how an admin makes a photo hot in the first place. Pinned and
+  // best-scoring first, so the interesting end of the party is at the top.
+  const query = adminStreamQuery.trim().toLowerCase();
+  const all = list
+    .filter((photo) => adminStreamMatches(photo, query))
+    .sort((left, right) => Number(right.pinned) - Number(left.pinned)
+      || streamScore(right) - streamScore(left)
+      || right.created_at.localeCompare(left.created_at));
+  $('admin-stream-none').hidden = all.length > 0;
+  $('admin-stream-all').replaceChildren(
+    ...all.map((photo) => adminStreamTile(photo, { lazy: true })),
+  );
 }
 
 async function loadAdminStream() {
@@ -1373,6 +1400,7 @@ async function loadAdminStream() {
   try {
     const result = await api('/api/photos/stream');
     const list = result.photos || [];
+    adminStreamPhotos = list;
     renderAdminStream(list);
     $('admin-stream-status').textContent = list.length
       ? 'Änderungen erscheinen innerhalb weniger Sekunden auf allen Bildschirmen.'
@@ -1409,6 +1437,14 @@ async function loadAdmin() {
     $('admin-status').textContent = 'Die Verwaltung konnte nicht geladen werden.';
   }
 }
+
+$('admin-stream-search').addEventListener('input', () => {
+  clearTimeout(adminStreamSearchTimer);
+  adminStreamSearchTimer = setTimeout(() => {
+    adminStreamQuery = $('admin-stream-search').value;
+    if (adminStreamPhotos.length) renderAdminStream(adminStreamPhotos);
+  }, 180);
+});
 
 $('admin-search').addEventListener('input', () => {
   clearTimeout(adminSearchTimer);
@@ -2175,12 +2211,13 @@ function streamScore(photo) {
 }
 
 function streamHighlights(list) {
-  // Two kinds of photo earn the flame frame: the ones the host pinned by hand,
-  // and the ones the party itself celebrated. Pins always make it in, because
-  // somebody chose them deliberately; the rest of the rotation is filled by
-  // score. Ranking needs something to rank, so a photo nobody has reacted to or
-  // commented on never counts as hot, and a gallery with no reactions at all
-  // simply has no highlights.
+  // A photo becomes hot in one of two ways: the party celebrated it, or an admin
+  // pinned it. Both count the same from here on -- a pin is simply a hand-picked
+  // hot photo, shown as often as the rest and wearing the same frame. Pins always
+  // make it in, because somebody chose them deliberately; the remaining places go
+  // by score. Ranking needs something to rank, so a photo nobody has reacted to
+  // or commented on never becomes hot on its own, and a gallery with no
+  // reactions at all simply has no hot photos.
   const pinned = list.filter((photo) => photo.pinned);
   const pinnedIds = new Set(pinned.map((photo) => photo.id));
   const rated = list
@@ -2198,10 +2235,7 @@ function streamHighlights(list) {
     Math.max(1, Math.round(list.length / STREAM_HIGHLIGHT_EVERY)),
   );
   const hot = rated.slice(0, Math.max(0, wanted - pinned.length));
-  return [
-    ...pinned.map((photo) => ({ ...photo, highlight: 'pinned' })),
-    ...hot.map((photo) => ({ ...photo, highlight: 'hot' })),
-  ];
+  return [...pinned, ...hot].map((photo) => ({ ...photo, highlight: 'hot' }));
 }
 
 function streamPlaylistFrom(list) {
@@ -2288,11 +2322,11 @@ function buildStreamSlots() {
     const caption = document.createElement('figcaption');
     figure.className = 'stream-photo';
     shot.className = 'stream-shot';
-    // The gold hairline lives on its own layer so its opacity can be faded with
-    // distance. Perspective shrinks a far card to a fifth, which would leave a
-    // one-pixel line covering a fifth of a screen pixel: it flickers on and off
-    // as it drifts across the grid, and that is the flickering frame. Fading it
-    // out means there is nothing left back there to flicker.
+    // The halo around the card, on its own layer. It replaces the gold hairline
+    // that used to sit here: perspective shrinks a far card to a fifth, so a
+    // one-pixel line covered a fifth of a screen pixel and flickered on and off
+    // as it drifted across the grid. A soft dark glow has no such edge to lose,
+    // and a hot photo swaps it for a warm one.
     edge.className = 'stream-edge';
     edge.setAttribute('aria-hidden', 'true');
     // The soft copy comes from the server already blurred and tiny. Blurring in
@@ -2316,7 +2350,6 @@ function buildStreamSlots() {
       soft,
       sharp,
       edge,
-      edgeOpacity: null,
       caption,
       photoId: null,
       highlight: null,
@@ -2351,9 +2384,7 @@ function renderStreamCaption(slot, photo) {
   if (photo.highlight) {
     const flag = document.createElement('span');
     flag.className = 'stream-flag';
-    flag.textContent = photo.highlight === 'pinned'
-      ? '📌 Vom Gastgeber gepinnt'
-      : '🔥 Meistgefeiertes Foto';
+    flag.textContent = '🔥 Hot';
     parts.push(flag);
   }
   if (photo.task) {
@@ -2403,7 +2434,6 @@ function paintStream() {
       if (slot.highlight !== (photo.highlight || null)) {
         slot.highlight = photo.highlight || null;
         slot.node.classList.toggle('is-highlight', Boolean(slot.highlight));
-        slot.node.classList.toggle('is-pinned', slot.highlight === 'pinned');
       }
       renderStreamCaption(slot, { ...(streamPhotoById.get(photo.id) || photo), highlight: slot.highlight });
       slot.place = streamPlacement(index);
@@ -2465,16 +2495,6 @@ function paintStream() {
       slot.sharpOpacity = sharpOpacity;
     }
 
-    // The frame fades out with distance rather than shrinking below a screen
-    // pixel. It reads as depth, and it is the reason the far frames no longer
-    // flicker. Quantised, because two dozen values are all the eye can tell
-    // apart and each one saves a style write.
-    const near = Math.min(1, Math.max(0, 1 - depth / (STREAM_SPACING * STREAM_EDGE_REACH)));
-    const edgeOpacity = Math.round(near * near * (3 - 2 * near) * 20) / 20;
-    if (slot.edgeOpacity !== edgeOpacity) {
-      slot.edge.style.opacity = String(edgeOpacity);
-      slot.edgeOpacity = edgeOpacity;
-    }
   }
 }
 
