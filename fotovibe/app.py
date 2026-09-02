@@ -727,14 +727,15 @@ def create_app(settings=None, store=None, task_store=None):
                     log.warning("invalid_hidden_photo_marker object=%s", obj.name)
         return hidden
 
-    def switched_on_photo_ids(prefix, kind):
-        """Photos whose latest admin switch of this kind is on.
+    def latest_photo_switch(prefix, kind):
+        """The latest position of one admin switch, per photo.
 
-        Both switches an admin has over the stream -- pinning a photo and taking
-        one off the wall -- come and go during an evening, and the object store
-        never mutates, so each click appends an event and the newest one for a
-        photo wins. The state rides in the object metadata, the way reactions do,
-        which keeps this to a single listing instead of a read per event.
+        Both switches an admin has over the stream -- calling a photo hot and
+        taking one off the wall -- come and go during an evening, and the object
+        store never mutates, so each click appends an event and the newest one
+        for a photo wins. The state rides in the object metadata, the way
+        reactions do, which keeps this to a single listing instead of a read per
+        event. A photo with no event at all is simply absent.
         """
         latest = {}
         for obj in store.list_prefix(f"{prefix}/"):
@@ -753,20 +754,31 @@ def create_app(settings=None, store=None, task_store=None):
             previous = latest.get(photo_id)
             if previous is None or (recorded_at, obj.name) >= previous[0]:
                 latest[photo_id] = ((recorded_at, obj.name), active)
-        return {photo_id for photo_id, (_, active) in latest.items() if active}
+        return {photo_id: active for photo_id, (_, active) in latest.items()}
 
-    def pinned_photo_ids():
-        return switched_on_photo_ids("pins", "pin")
+    def hot_choices():
+        """How an admin has ruled on each photo: hot, not hot, or no ruling.
+
+        A photo nobody has ruled on is absent here, and the party's reactions
+        decide it instead. A ruling overrides them in either direction, which
+        is what lets an admin take a photo out of the rotation that the votes
+        would otherwise keep in it.
+        """
+        return latest_photo_switch("pins", "pin")
 
     def off_stream_photo_ids():
         """Photos an admin took off the wall. They stay in the gallery."""
-        return switched_on_photo_ids("stream_hidden", "stream_hidden")
+        return {
+            photo_id
+            for photo_id, active in latest_photo_switch("stream_hidden", "stream_hidden").items()
+            if active
+        }
 
     def gallery_entries(include_hidden=False):
         """Build the gallery index, including task metadata from the bucket."""
         entries = []
         hidden_ids = hidden_photo_ids()
-        pinned_ids = pinned_photo_ids()
+        hot_ruling = hot_choices()
         off_stream_ids = off_stream_photo_ids()
         social = interaction_summaries()
         for obj in store.published():
@@ -817,7 +829,7 @@ def create_app(settings=None, store=None, task_store=None):
                 entry["author"] = author
             if include_hidden:
                 entry["hidden"] = photo_id in hidden_ids
-            entry["pinned"] = photo_id in pinned_ids
+            entry["hot"] = hot_ruling.get(photo_id)
             entry["in_stream"] = photo_id not in off_stream_ids
             entry["interactions"] = public_interactions(social.get(photo_id))
             entries.append(entry)
@@ -896,7 +908,9 @@ def create_app(settings=None, store=None, task_store=None):
             "author": (entry.get("author") or {}).get("name"),
             "reactions": interactions.get("reactions", []),
             "comments": interactions.get("comments_count", 0),
-            "pinned": bool(entry.get("pinned")),
+            # Three-way: an admin ruled it hot, ruled it out, or left it
+            # to the reactions, in which case this is absent.
+            "hot": entry.get("hot"),
             "in_stream": bool(entry.get("in_stream", True)),
         }
 
@@ -1280,21 +1294,26 @@ def create_app(settings=None, store=None, task_store=None):
             cache["until"] = 0
         return {"id": photo_id, "hidden": True, "already_hidden": not created}
 
-    @app.post("/api/admin/photos/{photo_id}/pin")
-    async def pin_photo(request: Request, photo_id: str):
-        """Put a photo on the stream by hand, or take it off again."""
+    @app.post("/api/admin/photos/{photo_id}/hot")
+    async def set_photo_hot(request: Request, photo_id: str):
+        """Rule a photo hot, or rule it out of the rotation.
+
+        This overrides the party's reactions in either direction: a photo the
+        votes would have made hot can be taken out of the rotation, and one
+        nobody has reacted to can be put into it.
+        """
         data = require_admin(request)
         valid_id(photo_id)
         manifest(photo_id)
         try:
             payload = await request.json()
-            pinned = payload.get("pinned", True)
-            if not isinstance(pinned, bool):
+            hot = payload.get("hot", True)
+            if not isinstance(hot, bool):
                 raise TypeError
         except (AttributeError, TypeError, ValueError):
-            raise HTTPException(400, "Bitte gib an, ob das Foto gepinnt werden soll.") from None
-        if pinned and photo_id in hidden_photo_ids():
-            raise HTTPException(409, "Ausgeblendete Fotos können nicht gepinnt werden.")
+            raise HTTPException(400, "Bitte gib an, ob das Foto hot sein soll.") from None
+        if hot and photo_id in hidden_photo_ids():
+            raise HTTPException(409, "Ausgeblendete Fotos können nicht hot werden.")
         recorded_at = datetime.now(UTC).isoformat()
         store.put(
             f"pins/{photo_id}/{uuid.uuid4()}.json",
@@ -1302,8 +1321,8 @@ def create_app(settings=None, store=None, task_store=None):
                 {
                     "schema_version": 1,
                     "photo_id": photo_id,
-                    "pinned": pinned,
-                    "pinned_by": "d_" + data["device"][:12],
+                    "hot": hot,
+                    "decided_by": "d_" + data["device"][:12],
                     "recorded_at": recorded_at,
                 },
                 separators=(",", ":"),
@@ -1312,13 +1331,13 @@ def create_app(settings=None, store=None, task_store=None):
             {
                 "kind": "pin",
                 "photo_id": photo_id,
-                "active": "1" if pinned else "0",
+                "active": "1" if hot else "0",
                 "recorded_at": recorded_at,
             },
         )
         with cache_lock:
             cache["until"] = 0
-        return {"id": photo_id, "pinned": pinned}
+        return {"id": photo_id, "hot": hot}
 
     @app.post("/api/admin/photos/{photo_id}/stream")
     async def set_photo_on_stream(request: Request, photo_id: str):

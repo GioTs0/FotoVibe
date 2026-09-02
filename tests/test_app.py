@@ -475,7 +475,7 @@ def test_admin_can_hide_photos_and_review_every_registered_user(tmp_path):
     assert hidden_user["photos"][0]["hidden"] is True
 
 
-def test_admin_pins_photos_onto_the_stream_and_takes_them_off_again(tmp_path):
+def test_admin_rules_a_photo_hot_in_either_direction(tmp_path):
     store = LocalStore(tmp_path)
     admin_device = str(uuid.uuid4())
     epoch = hashlib.sha256(b"TESTCODE").hexdigest()
@@ -497,48 +497,51 @@ def test_admin_pins_photos_onto_the_stream_and_takes_them_off_again(tmp_path):
     def streamed():
         return {photo["id"]: photo for photo in guest.get("/api/photos/stream").json()["photos"]}
 
-    assert streamed()[photo_id]["pinned"] is False
+    # No ruling yet: the field is there but empty, so the reactions decide.
+    assert streamed()[photo_id]["hot"] is None
     assert streamed()[photo_id]["comments"] == 0
 
     assert guest.post(
-        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
+        f"/api/admin/photos/{photo_id}/hot", json={"hot": True}, headers=ORIGIN
     ).status_code == 403
 
-    pinned = admin.post(
-        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
+    ruled_hot = admin.post(
+        f"/api/admin/photos/{photo_id}/hot", json={"hot": True}, headers=ORIGIN
     )
-    assert pinned.status_code == 200
-    assert pinned.json() == {"id": photo_id, "pinned": True}
-    assert streamed()[photo_id]["pinned"] is True
-    assert guest.get("/api/photos").json()["photos"][0]["pinned"] is True
+    assert ruled_hot.status_code == 200
+    assert ruled_hot.json() == {"id": photo_id, "hot": True}
+    assert streamed()[photo_id]["hot"] is True
+    assert guest.get("/api/photos").json()["photos"][0]["hot"] is True
 
     # A comment has to reach the stream, because the screens rank on it.
     guest.post(f"/api/photos/{photo_id}/comments", json={"text": "Schön!"}, headers=ORIGIN)
     assert streamed()[photo_id]["comments"] == 1
 
     assert admin.post(
-        f"/api/admin/photos/{photo_id}/pin", json={"pinned": "ja"}, headers=ORIGIN
+        f"/api/admin/photos/{photo_id}/hot", json={"hot": "ja"}, headers=ORIGIN
     ).status_code == 400
 
-    unpinned = admin.post(
-        f"/api/admin/photos/{photo_id}/pin", json={"pinned": False}, headers=ORIGIN
+    # Ruling it out is a decision of its own, not a return to the reactions:
+    # the photo has a comment now and would otherwise qualify on its own.
+    ruled_out = admin.post(
+        f"/api/admin/photos/{photo_id}/hot", json={"hot": False}, headers=ORIGIN
     )
-    assert unpinned.json() == {"id": photo_id, "pinned": False}
-    assert streamed()[photo_id]["pinned"] is False
+    assert ruled_out.json() == {"id": photo_id, "hot": False}
+    assert streamed()[photo_id]["hot"] is False
 
     # Nothing was overwritten: both decisions are still on record, newest wins.
     assert len(store.list_prefix(f"pins/{photo_id}/")) == 2
 
     assert admin.post(
-        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
-    ).json()["pinned"] is True
+        f"/api/admin/photos/{photo_id}/hot", json={"hot": True}, headers=ORIGIN
+    ).json()["hot"] is True
     admin.post(f"/api/admin/photos/{photo_id}/hide", headers=ORIGIN)
     assert photo_id not in streamed()
     assert admin.post(
-        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
+        f"/api/admin/photos/{photo_id}/hot", json={"hot": True}, headers=ORIGIN
     ).status_code == 409
     assert admin.post(
-        f"/api/admin/photos/{uuid.uuid4()!s}/pin", json={"pinned": True}, headers=ORIGIN
+        f"/api/admin/photos/{uuid.uuid4()!s}/hot", json={"hot": True}, headers=ORIGIN
     ).status_code == 404
 
 
@@ -586,7 +589,7 @@ def test_admin_takes_a_photo_off_the_stream_but_keeps_it_in_the_gallery(tmp_path
     assert listed[photo_id]["in_stream"] is False
 
     # A hot photo that is off the wall stays off it.
-    admin.post(f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN)
+    admin.post(f"/api/admin/photos/{photo_id}/hot", json={"hot": True}, headers=ORIGIN)
     assert on_wall() == []
 
     back = admin.post(

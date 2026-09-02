@@ -1087,31 +1087,28 @@ async function hidePhotoFromGallery(photoId, button, messageTarget) {
   }
 }
 
-function pinLabel(pinned) {
-  return pinned ? 'Vom Stream nehmen' : 'Im Stream anpinnen';
+function hotLabel(hot) {
+  return hot ? 'Hot-Markierung entfernen' : 'Als Hot markieren';
 }
 
-/** Returns the state the photo is actually in afterwards, unchanged on failure. */
-async function pinPhotoToStream(photoId, pinned, button, messageTarget) {
-  if (!currentUser?.is_admin) return !pinned;
+/** Rules a photo hot or out of the rotation. Returns the ruling that now
+ *  stands, or the previous one if the call failed. Leaves the button's wording
+ *  alone: a caller whose button is a lamp must not have it relabelled. */
+async function setPhotoHot(photoId, hot, button, messageTarget) {
+  if (!currentUser?.is_admin) return !hot;
   button.disabled = true;
   try {
-    const result = await api(`/api/admin/photos/${photoId}/pin`, {
+    const result = await api(`/api/admin/photos/${photoId}/hot`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pinned }),
+      body: JSON.stringify({ hot }),
     });
     const photo = photos.get(photoId);
-    if (photo) photo.pinned = result.pinned;
-    button.textContent = pinLabel(result.pinned);
-    button.setAttribute('aria-pressed', String(result.pinned));
-    messageTarget.textContent = result.pinned
-      ? 'Das Foto läuft jetzt hervorgehoben im Stream.'
-      : 'Das Foto läuft wieder ganz normal mit.';
-    return result.pinned;
+    if (photo) photo.hot = result.hot;
+    return result.hot;
   } catch (error) {
     messageTarget.textContent = error.message;
-    return !pinned;
+    return !hot;
   } finally {
     button.disabled = false;
   }
@@ -1127,9 +1124,6 @@ async function setPhotoOnStream(photoId, shown, button, messageTarget) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ shown }),
     });
-    messageTarget.textContent = result.in_stream
-      ? 'Das Foto läuft wieder im Stream.'
-      : 'Das Foto läuft nicht mehr im Stream. In der Galerie bleibt es sichtbar.';
     return result.in_stream;
   } catch (error) {
     messageTarget.textContent = error.message;
@@ -1354,61 +1348,95 @@ function streamShapeOf(entry) {
     author: (entry.author || {}).name,
     reactions: interactions.reactions || [],
     comments: interactions.comments_count || 0,
-    pinned: Boolean(entry.pinned),
+    hot: entry.hot,
     in_stream: entry.in_stream !== false,
   };
 }
 
-function adminGridTile(photo, hotIds) {
-  // The gallery's own tile, so the panel looks exactly like the gallery, with
-  // the two decisions laid straight on top of it. Acting where the photo sits
-  // beats opening anything: an admin scanning a wall of photos never loses
-  // their place.
+// Every tile stays reachable after it is drawn, so a click can relight it where
+// it sits instead of rebuilding the grid. Rebuilding would re-sort, and a photo
+// jumping away from under the finger that just tapped it is the opposite of
+// what a wall of two hundred photos needs.
+const adminTiles = new Map();
+
+function adminGridTile(photo) {
   const tile = document.createElement('div');
   fillPhotoTile(tile, photo);
-  const onWall = photo.in_stream !== false;
-  tile.classList.toggle('is-off-stream', !onWall);
   tile.classList.add('has-tile-actions');
 
   const actions = document.createElement('div');
   actions.className = 'photo-tile-actions';
   const who = photo.author?.name ? `Foto von ${photo.author.name}` : 'Foto';
 
-  // A photo can be hot without an admin touching it, because the party voted it
-  // up. The button lights up for what the wall actually does; pressing it
-  // toggles only the part an admin controls.
-  const isHot = hotIds.has(photo.id);
   const hot = document.createElement('button');
   hot.type = 'button';
   hot.className = 'tile-action';
-  hot.classList.toggle('is-on', isHot);
   hot.textContent = '🔥 Hot';
-  hot.setAttribute('aria-pressed', String(Boolean(photo.pinned)));
-  hot.setAttribute('aria-label', photo.pinned
-    ? `${who}: Hot-Markierung entfernen`
-    : `${who}: als Hot markieren`);
   hot.addEventListener('click', async () => {
-    await pinPhotoToStream(photo.id, !photo.pinned, hot, $('admin-stream-status'));
-    await loadAdminStream();
+    // The current set matters: a photo can be hot on the party's votes alone,
+    // and pressing the lamp then has to turn it off, not on.
+    const wasHot = adminPhotoIsHot(photo, adminHotIds());
+    const now = await setPhotoHot(photo.id, !wasHot, hot, $('admin-stream-status'));
+    photo.hot = now;
+    refreshAdminStream();
   });
 
   const hide = document.createElement('button');
   hide.type = 'button';
   hide.className = 'tile-action';
-  hide.classList.toggle('is-off', !onWall);
-  hide.textContent = onWall ? 'Verstecken' : 'Zeigen';
-  hide.setAttribute('aria-pressed', String(!onWall));
-  hide.setAttribute('aria-label', onWall
-    ? `${who}: vom Stream verstecken`
-    : `${who}: wieder im Stream zeigen`);
+  hide.textContent = 'Verstecken';
   hide.addEventListener('click', async () => {
-    await setPhotoOnStream(photo.id, !onWall, hide, $('admin-stream-status'));
-    await loadAdminStream();
+    const onWall = photo.in_stream !== false;
+    const now = await setPhotoOnStream(photo.id, !onWall, hide, $('admin-stream-status'));
+    photo.in_stream = now;
+    refreshAdminStream();
   });
 
   actions.append(hot, hide);
   tile.append(actions);
+  adminTiles.set(photo.id, { tile, hot, hide, photo, who });
   return tile;
+}
+
+/** Whether this photo is hot right now: an admin's ruling if there is one, and
+ *  otherwise whatever the party's reactions currently say. */
+function adminPhotoIsHot(photo, hotIds) {
+  if (photo.hot === true || photo.hot === false) return photo.hot;
+  // A photo that is off the wall cannot be hot on it, and its votes say nothing
+  // about a rotation it is not in.
+  if (photo.in_stream === false) return false;
+  return Boolean(hotIds && hotIds.has(photo.id));
+}
+
+/** The photos the wall is treating as hot right now, from the list in memory. */
+function adminHotIds() {
+  const running = adminStreamPhotos.filter((photo) => photo.in_stream !== false);
+  return new Set(streamHighlights(running.map(streamShapeOf)).map((photo) => photo.id));
+}
+
+/** Relight every tile and redo the counts from the list already in memory.
+ *  Nothing is fetched, nothing is re-sorted, nothing moves. */
+function refreshAdminStream() {
+  const running = adminStreamPhotos.filter((photo) => photo.in_stream !== false);
+  const hotIds = adminHotIds();
+  for (const { tile, hot, hide, photo, who } of adminTiles.values()) {
+    const isHot = adminPhotoIsHot(photo, hotIds);
+    const onWall = photo.in_stream !== false;
+    hot.classList.toggle('is-on', isHot);
+    hot.setAttribute('aria-pressed', String(isHot));
+    hot.setAttribute('aria-label', `${who}: ${hotLabel(isHot)}`);
+    hide.classList.toggle('is-off', !onWall);
+    hide.setAttribute('aria-pressed', String(!onWall));
+    hide.setAttribute('aria-label', onWall
+      ? `${who}: vom Stream verstecken`
+      : `${who}: wieder im Stream zeigen`);
+    tile.classList.toggle('is-off-stream', !onWall);
+  }
+  $('admin-stream-summary').hidden = false;
+  $('admin-stream-summary').replaceChildren(
+    adminMetric('Fotos im Stream', running.length),
+    adminMetric('Hot', hotIds.size),
+  );
 }
 
 function adminStreamMatches(photo, query) {
@@ -1418,29 +1446,17 @@ function adminStreamMatches(photo, query) {
 }
 
 function renderAdminStream(list) {
-  // Ranked by the same function the wall uses, on the same photos the wall
-  // gets, so what an admin reads here is exactly what it shows.
-  const running = list.filter((photo) => photo.in_stream !== false).map(streamShapeOf);
-  const highlights = streamHighlights(running);
-  $('admin-stream-summary').hidden = false;
-  $('admin-stream-summary').replaceChildren(
-    adminMetric('Fotos im Stream', running.length),
-    adminMetric('Hot', highlights.length),
-    adminMetric('Admin Hot', list.filter((photo) => photo.pinned).length),
-  );
-
-  // Every photo is here, not only the ones already hot: marking one is how an
-  // admin makes it hot in the first place. Hot and best-scoring first, then the
-  // rest, so the interesting end of the party is at the top.
+  // Newest first, exactly as the gallery orders itself. The order is fixed for
+  // as long as the panel is open: sorting hot photos to the front would shuffle
+  // the grid under the reader every time one was marked.
   const query = adminStreamQuery.trim().toLowerCase();
-  const hotIds = new Set(highlights.map((photo) => photo.id));
-  const all = list
+  const shown = list
     .filter((photo) => adminStreamMatches(photo, query))
-    .sort((left, right) => Number(hotIds.has(right.id)) - Number(hotIds.has(left.id))
-      || streamScore(streamShapeOf(right)) - streamScore(streamShapeOf(left))
-      || right.created_at.localeCompare(left.created_at));
-  $('admin-stream-none').hidden = all.length > 0;
-  $('admin-stream-all').replaceChildren(...all.map((photo) => adminGridTile(photo, hotIds)));
+    .sort((left, right) => right.created_at.localeCompare(left.created_at));
+  $('admin-stream-none').hidden = shown.length > 0;
+  adminTiles.clear();
+  $('admin-stream-all').replaceChildren(...shown.map(adminGridTile));
+  refreshAdminStream();
 }
 
 async function loadAdminStream() {
@@ -2252,12 +2268,19 @@ function photoButton(photo) {
     $('download').href = `/api/photos/${photo.id}/original`;
     $('detail-hide').hidden = !currentUser?.is_admin;
     $('detail-hide').onclick = () => hidePhotoFromGallery(photo.id, $('detail-hide'), $('detail-status'));
-    let pinned = Boolean(photo.pinned);
+    // Here the button carries words rather than a lamp, so it says what the
+    // next press will do and reports the outcome.
+    let hot = photo.hot === true;
     $('detail-pin').hidden = !currentUser?.is_admin;
-    $('detail-pin').textContent = pinLabel(pinned);
-    $('detail-pin').setAttribute('aria-pressed', String(pinned));
+    $('detail-pin').textContent = hotLabel(hot);
+    $('detail-pin').setAttribute('aria-pressed', String(hot));
     $('detail-pin').onclick = async () => {
-      pinned = await pinPhotoToStream(photo.id, !pinned, $('detail-pin'), $('detail-status'));
+      hot = await setPhotoHot(photo.id, !hot, $('detail-pin'), $('detail-status'));
+      $('detail-pin').textContent = hotLabel(hot);
+      $('detail-pin').setAttribute('aria-pressed', String(hot));
+      $('detail-status').textContent = hot
+        ? 'Das Foto läuft jetzt als Hot im Stream.'
+        : 'Das Foto ist nicht mehr als Hot markiert.';
     };
     $('detail-comment-input').value = '';
     $('detail-comment-error').textContent = '';
@@ -2275,16 +2298,16 @@ function streamScore(photo) {
 
 function streamHighlights(list) {
   // A photo becomes hot in one of two ways: the party celebrated it, or an admin
-  // pinned it. Both count the same from here on -- a pin is simply a hand-picked
-  // hot photo, shown as often as the rest and wearing the same frame. Pins always
-  // make it in, because somebody chose them deliberately; the remaining places go
-  // by score. Ranking needs something to rank, so a photo nobody has reacted to
-  // or commented on never becomes hot on its own, and a gallery with no
-  // reactions at all simply has no hot photos.
-  const pinned = list.filter((photo) => photo.pinned);
-  const pinnedIds = new Set(pinned.map((photo) => photo.id));
+  // said so. Both count the same from here on -- a hand-picked hot photo is
+  // shown as often as a voted one and wears the same frame. An admin's ruling
+  // works in both directions, so one they ruled out stays out however popular it
+  // gets. Ranking needs something to rank, so a photo nobody has reacted to or
+  // commented on never becomes hot on its own, and a gallery with no reactions
+  // at all simply has no hot photos.
+  const chosen = list.filter((photo) => photo.hot === true);
   const rated = list
-    .filter((photo) => !pinnedIds.has(photo.id) && streamScore(photo) > 0)
+    .filter((photo) => photo.hot === undefined || photo.hot === null)
+    .filter((photo) => streamScore(photo) > 0)
     .sort((left, right) => streamScore(right) - streamScore(left)
       // Every screen has to reach the same order from the same list, so the
       // ties are broken on values rather than on the order they arrived in.
@@ -2297,8 +2320,8 @@ function streamHighlights(list) {
     STREAM_HIGHLIGHT_MAX,
     Math.max(1, Math.round(list.length / STREAM_HIGHLIGHT_EVERY)),
   );
-  const hot = rated.slice(0, Math.max(0, wanted - pinned.length));
-  return [...pinned, ...hot].map((photo) => ({ ...photo, highlight: 'hot' }));
+  const hot = rated.slice(0, Math.max(0, wanted - chosen.length));
+  return [...chosen, ...hot].map((photo) => ({ ...photo, highlight: 'hot' }));
 }
 
 function streamPlaylistFrom(list) {
