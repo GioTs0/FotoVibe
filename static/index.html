@@ -161,14 +161,23 @@
           </form>
         </section>
         <a id="download" class="button primary" download>Original herunterladen <span aria-hidden="true">↓</span></a>
+        <button id="detail-pin" class="secondary admin-pin-action" type="button" hidden aria-pressed="false">Im Stream anpinnen</button>
         <button id="detail-hide" class="secondary admin-hide-action" type="button" hidden>Aus Galerie entfernen</button>
       </div>
     </section>
     <section id="admin" class="admin-page" hidden aria-labelledby="admin-title">
       <div class="admin-heading"><div><p class="eyebrow">Verwaltung</p><h1 id="admin-title">Party im Überblick.</h1><p id="admin-status" class="muted" role="status">Daten werden geladen …</p></div><button id="admin-back" class="secondary" type="button">← Zurück</button></div>
-      <div class="admin-tabs" role="tablist" aria-label="Admin-Bereiche"><button id="admin-users-tab" type="button" role="tab" aria-selected="true" aria-controls="admin-users-pane">Gäste</button><button id="admin-tasks-tab" type="button" role="tab" aria-selected="false" aria-controls="admin-tasks-pane">Aufgaben</button></div>
+      <div class="admin-tabs" role="tablist" aria-label="Admin-Bereiche"><button id="admin-users-tab" type="button" role="tab" aria-selected="true" aria-controls="admin-users-pane">Gäste</button><button id="admin-stream-tab" type="button" role="tab" aria-selected="false" aria-controls="admin-stream-pane">Stream</button><button id="admin-tasks-tab" type="button" role="tab" aria-selected="false" aria-controls="admin-tasks-pane">Aufgaben</button></div>
       <p id="admin-error" class="error" role="alert"></p>
       <section id="admin-users-pane" role="tabpanel" aria-labelledby="admin-users-tab"><label class="admin-search" for="admin-search"><span>Gäste durchsuchen</span><input id="admin-search" type="search" autocomplete="off" placeholder="Name, Nutzer- oder Geräte-ID suchen" aria-describedby="admin-search-hint"><small id="admin-search-hint">Durchsucht alle registrierten Party-Gäste.</small></label><div id="admin-summary" class="admin-summary" hidden></div><div id="admin-users" class="admin-users"></div><p id="admin-empty" class="admin-empty" hidden>Keine passenden Gäste gefunden.</p></section>
+      <section id="admin-stream-pane" role="tabpanel" aria-labelledby="admin-stream-tab" hidden>
+        <p class="admin-pane-intro">Der Stream läuft von allein. Alle zehn Fotos schiebt er ein hervorgehobenes dazwischen: entweder eines, das ihr angepinnt habt, oder das meistgefeierte des Abends.</p>
+        <div id="admin-stream-summary" class="admin-summary" hidden></div>
+        <p id="admin-stream-status" class="muted" role="status"></p>
+        <h2 class="admin-pane-title">Hervorgehoben im Stream</h2>
+        <div id="admin-stream-highlights" class="admin-photo-previews"></div>
+        <p id="admin-stream-empty" class="admin-empty" hidden>Noch nichts hervorgehoben. Sobald Gäste reagieren oder ihr ein Foto anpinnt, erscheint es hier.</p>
+      </section>
       <section id="admin-tasks-pane" role="tabpanel" aria-labelledby="admin-tasks-tab" hidden><form id="admin-task-create-form" class="admin-task-create"><label for="admin-task-create-input">Neue Foto-Aufgabe</label><textarea id="admin-task-create-input" maxlength="500" rows="3" placeholder="Eine Aufgabe für die Party schreiben …"></textarea><button id="admin-task-create-submit" class="primary" type="submit">Aufgabe hinzufügen</button></form><p id="admin-tasks-status" class="muted" role="status"></p><div id="admin-tasks" class="admin-tasks"></div><p id="admin-tasks-empty" class="admin-empty" hidden>Noch keine Aufgaben vorhanden.</p></section>
     </section>
     <section id="stream" class="stream-page" hidden aria-labelledby="stream-title">

@@ -89,9 +89,19 @@ const STREAM_SPREAD_X = 52; // widest scatter on screen, percent of the stage wi
 const STREAM_SPREAD_Y = 46; // widest scatter on screen, percent of the stage height
 const STREAM_CONVERGE_MIN = 0.18; // scatter kept at the very front, so nothing snaps
 const STREAM_FADE_OUT = 0.18; // fraction of one spacing a passing photo fades over
-const STREAM_BLUR_MAX = 2.4; // strongest background blur, measured on screen
-const STREAM_BLUR_RATE = 0.75; // screen blur gained per spacing of depth
 const STREAM_GOLDEN_ANGLE = 2.399963229728653; // 137.5 degrees, in radians
+// Depth blur used to be recomputed per frame. Changing an element's filter
+// forces the browser to repaint the whole card, and that repaint visibly snaps:
+// measured on a background card, one such change moved 45 per cent of its
+// pixels at once, which is the flicker along the frames. So the softening is
+// now a fixed blur on a permanently soft copy of the photo, and the sharp copy
+// is faded in over it. Opacity is a compositor property, so nothing repaints.
+const STREAM_SHARP_SLOTS = 4; // nearest slots that load the full-size photo
+const STREAM_SHARP_REACH = 2; // spacings over which the sharp copy fades in
+const STREAM_EDGE_REACH = 3; // spacings over which the gold frame fades away
+const STREAM_HIGHLIGHT_EVERY = 10; // ordinary photos between two highlights
+const STREAM_HIGHLIGHT_MAX = 8; // widest highlight rotation, so it stays special
+const STREAM_COMMENT_WEIGHT = 2; // a written comment counts for more than a tap
 let streamTimer = null;
 let streamFrameHandle = null;
 let streamPollTimer = null;
@@ -1075,6 +1085,36 @@ async function hidePhotoFromGallery(photoId, button, messageTarget) {
   }
 }
 
+function pinLabel(pinned) {
+  return pinned ? 'Vom Stream nehmen' : 'Im Stream anpinnen';
+}
+
+/** Returns the state the photo is actually in afterwards, unchanged on failure. */
+async function pinPhotoToStream(photoId, pinned, button, messageTarget) {
+  if (!currentUser?.is_admin) return !pinned;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/admin/photos/${photoId}/pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned }),
+    });
+    const photo = photos.get(photoId);
+    if (photo) photo.pinned = result.pinned;
+    button.textContent = pinLabel(result.pinned);
+    button.setAttribute('aria-pressed', String(result.pinned));
+    messageTarget.textContent = result.pinned
+      ? 'Das Foto läuft jetzt hervorgehoben im Stream.'
+      : 'Das Foto läuft wieder ganz normal mit.';
+    return result.pinned;
+  } catch (error) {
+    messageTarget.textContent = error.message;
+    return !pinned;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function updateAdminRole(user, button, status) {
   const desired = !user.is_admin;
   if (!desired && !window.confirm(`Adminrechte für ${user.name} entziehen?`)) return;
@@ -1280,14 +1320,79 @@ async function loadAdminTasks() {
   }
 }
 
+function renderAdminStream(list) {
+  // Exactly the rotation the wall builds, from the same list and the same
+  // function, so what an admin reads here is what the television shows.
+  const highlights = streamHighlights(list);
+  const container = $('admin-stream-highlights');
+  container.replaceChildren();
+  $('admin-stream-empty').hidden = highlights.length > 0;
+  $('admin-stream-summary').hidden = false;
+  $('admin-stream-summary').replaceChildren(
+    adminMetric('Fotos im Stream', list.length),
+    adminMetric('Angepinnt', highlights.filter((photo) => photo.highlight === 'pinned').length),
+    adminMetric('Meistgefeiert', highlights.filter((photo) => photo.highlight === 'hot').length),
+  );
+  for (const photo of highlights) {
+    const item = document.createElement('figure');
+    item.className = 'admin-photo-preview admin-stream-item';
+    const image = document.createElement('img');
+    image.src = `/api/photos/${photo.id}/thumb`;
+    image.alt = '';
+    image.decoding = 'async';
+    const caption = document.createElement('figcaption');
+    const flag = document.createElement('span');
+    flag.className = 'admin-stream-flag';
+    flag.textContent = photo.highlight === 'pinned' ? '📌 Angepinnt' : '🔥 Meistgefeiert';
+    const detail = document.createElement('span');
+    detail.className = 'admin-stream-detail';
+    const score = streamScore(photo);
+    detail.textContent = [
+      photo.author || 'Ohne Namen',
+      `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`,
+    ].join(' · ');
+    caption.append(flag, detail);
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'secondary admin-preview-hide';
+    action.textContent = pinLabel(Boolean(photo.pinned));
+    action.setAttribute('aria-pressed', String(Boolean(photo.pinned)));
+    action.addEventListener('click', async () => {
+      await pinPhotoToStream(photo.id, !photo.pinned, action, $('admin-stream-status'));
+      await loadAdminStream();
+    });
+    item.append(image, caption, action);
+    container.append(item);
+  }
+}
+
+async function loadAdminStream() {
+  if (!currentUser?.is_admin) return;
+  $('admin-error').textContent = '';
+  $('admin-stream-status').textContent = 'Stream wird gelesen …';
+  try {
+    const result = await api('/api/photos/stream');
+    const list = result.photos || [];
+    renderAdminStream(list);
+    $('admin-stream-status').textContent = list.length
+      ? 'Änderungen erscheinen innerhalb weniger Sekunden auf allen Bildschirmen.'
+      : 'Noch keine Fotos in der Galerie.';
+  } catch (error) {
+    $('admin-error').textContent = error.message;
+    $('admin-stream-status').textContent = 'Der Stream konnte nicht gelesen werden.';
+  }
+}
+
+const ADMIN_TABS = ['users', 'stream', 'tasks'];
+
 async function setAdminTab(tab) {
-  adminTab = tab;
-  const tasks = tab === 'tasks';
-  $('admin-users-tab').setAttribute('aria-selected', String(!tasks));
-  $('admin-tasks-tab').setAttribute('aria-selected', String(tasks));
-  $('admin-users-pane').hidden = tasks;
-  $('admin-tasks-pane').hidden = !tasks;
-  if (tasks) await loadAdminTasks();
+  adminTab = ADMIN_TABS.includes(tab) ? tab : 'users';
+  for (const name of ADMIN_TABS) {
+    $(`admin-${name}-tab`).setAttribute('aria-selected', String(name === adminTab));
+    $(`admin-${name}-pane`).hidden = name !== adminTab;
+  }
+  if (adminTab === 'tasks') await loadAdminTasks();
+  if (adminTab === 'stream') await loadAdminStream();
 }
 
 async function loadAdmin() {
@@ -1313,8 +1418,9 @@ $('admin-search').addEventListener('input', () => {
   }, 180);
 });
 
-$('admin-users-tab').addEventListener('click', () => setAdminTab('users'));
-$('admin-tasks-tab').addEventListener('click', () => setAdminTab('tasks'));
+for (const name of ADMIN_TABS) {
+  $(`admin-${name}-tab`).addEventListener('click', () => setAdminTab(name));
+}
 $('admin-task-create-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   $('admin-error').textContent = '';
@@ -1333,9 +1439,10 @@ $('admin-open').addEventListener('click', async () => {
   $('upload').hidden = $('gallery').hidden = $('stream').hidden = true;
   stopStream();
   $('admin').hidden = false;
-  await setAdminTab(adminTab);
-  if (adminTab === 'users') await loadAdmin();
-  $(adminTab === 'tasks' ? 'admin-tasks-tab' : 'admin-back').focus();
+  // The heading carries the party totals on every tab, so the overview is
+  // always fetched, not only when the guest list happens to be open.
+  await Promise.all([setAdminTab(adminTab), loadAdmin()]);
+  $(adminTab === 'users' ? 'admin-back' : `admin-${adminTab}-tab`).focus();
 });
 $('admin-back').addEventListener('click', async () => {
   $('admin').hidden = true;
@@ -2046,6 +2153,13 @@ function photoButton(photo) {
     $('download').href = `/api/photos/${photo.id}/original`;
     $('detail-hide').hidden = !currentUser?.is_admin;
     $('detail-hide').onclick = () => hidePhotoFromGallery(photo.id, $('detail-hide'), $('detail-status'));
+    let pinned = Boolean(photo.pinned);
+    $('detail-pin').hidden = !currentUser?.is_admin;
+    $('detail-pin').textContent = pinLabel(pinned);
+    $('detail-pin').setAttribute('aria-pressed', String(pinned));
+    $('detail-pin').onclick = async () => {
+      pinned = await pinPhotoToStream(photo.id, !pinned, $('detail-pin'), $('detail-status'));
+    };
     $('detail-comment-input').value = '';
     $('detail-comment-error').textContent = '';
     void loadDetailInteractions(photo.id);
@@ -2055,19 +2169,82 @@ function photoButton(photo) {
   return button;
 }
 
+function streamScore(photo) {
+  const reactions = (photo.reactions || []).reduce((total, entry) => total + (entry.count || 0), 0);
+  return reactions + STREAM_COMMENT_WEIGHT * (photo.comments || 0);
+}
+
+function streamHighlights(list) {
+  // Two kinds of photo earn the flame frame: the ones the host pinned by hand,
+  // and the ones the party itself celebrated. Pins always make it in, because
+  // somebody chose them deliberately; the rest of the rotation is filled by
+  // score. Ranking needs something to rank, so a photo nobody has reacted to or
+  // commented on never counts as hot, and a gallery with no reactions at all
+  // simply has no highlights.
+  const pinned = list.filter((photo) => photo.pinned);
+  const pinnedIds = new Set(pinned.map((photo) => photo.id));
+  const rated = list
+    .filter((photo) => !pinnedIds.has(photo.id) && streamScore(photo) > 0)
+    .sort((left, right) => streamScore(right) - streamScore(left)
+      // Every screen has to reach the same order from the same list, so the
+      // ties are broken on values rather than on the order they arrived in.
+      || right.created_at.localeCompare(left.created_at)
+      || left.id.localeCompare(right.id));
+  // One highlight per ten photos: ten photos have a single favourite, fifty
+  // have five. Capped, so late in the evening it stays an honour rather than
+  // every third picture.
+  const wanted = Math.min(
+    STREAM_HIGHLIGHT_MAX,
+    Math.max(1, Math.round(list.length / STREAM_HIGHLIGHT_EVERY)),
+  );
+  const hot = rated.slice(0, Math.max(0, wanted - pinned.length));
+  return [
+    ...pinned.map((photo) => ({ ...photo, highlight: 'pinned' })),
+    ...hot.map((photo) => ({ ...photo, highlight: 'hot' })),
+  ];
+}
+
 function streamPlaylistFrom(list) {
   if (!list.length) return [];
   // The server sends newest first. Alternating the freshest photos with a walk
   // through the whole list gives new uploads a visible head start while every
   // photo keeps coming back around.
   const fresh = list.slice(0, Math.min(STREAM_FRESH, list.length));
-  const playlist = [];
+  const rotation = [];
   for (let i = 0; i < Math.max(list.length, fresh.length); i += 1) {
-    playlist.push(fresh[i % fresh.length]);
-    playlist.push(list[i % list.length]);
+    rotation.push(fresh[i % fresh.length]);
+    rotation.push(list[i % list.length]);
   }
   // The same picture twice in a row reads as a frozen screen.
-  return playlist.filter((photo, index) => index === 0 || photo.id !== playlist[index - 1].id);
+  const ordinary = rotation.filter((photo, index) => index === 0 || photo.id !== rotation[index - 1].id);
+  const highlights = streamHighlights(list);
+  if (!highlights.length) return ordinary;
+  const playlist = [];
+  let next = 0;
+  for (let i = 0; i < ordinary.length; i += 1) {
+    playlist.push(ordinary[i]);
+    if ((i + 1) % STREAM_HIGHLIGHT_EVERY) continue;
+    // The corridor holds a dozen photos at once, so a highlight must not repeat
+    // a picture that is already somewhere on the screen: the same photo twice,
+    // one of them in flames, reads as a fault rather than as an honour. The
+    // rotation moves on to the next candidate instead.
+    const near = new Set();
+    for (let step = -STREAM_VISIBLE; step <= STREAM_VISIBLE; step += 1) {
+      near.add(ordinary[((i + step) % ordinary.length + ordinary.length) % ordinary.length].id);
+    }
+    let chosen = 0;
+    for (let tries = 0; tries < highlights.length; tries += 1) {
+      if (near.has(highlights[(next + tries) % highlights.length].id)) continue;
+      chosen = tries;
+      break;
+    }
+    // A gallery smaller than the corridor cannot satisfy this at all: every
+    // photo is always on screen somewhere. Showing the highlight anyway beats
+    // dropping it, so an unavoidable clash falls through to the next in turn.
+    playlist.push(highlights[(next + chosen) % highlights.length]);
+    next = (next + chosen + 1) % highlights.length;
+  }
+  return playlist;
 }
 
 // Photos sit on a fixed grid in depth and the camera glides forward along it,
@@ -2104,21 +2281,56 @@ function buildStreamSlots() {
   streamSlots.length = 0;
   for (let i = 0; i <= STREAM_VISIBLE; i += 1) {
     const figure = document.createElement('figure');
-    const image = document.createElement('img');
+    const shot = document.createElement('div');
+    const soft = document.createElement('img');
+    const sharp = document.createElement('img');
+    const edge = document.createElement('span');
     const caption = document.createElement('figcaption');
     figure.className = 'stream-photo';
-    image.decoding = 'async';
-    image.alt = '';
+    shot.className = 'stream-shot';
+    // The gold hairline lives on its own layer so its opacity can be faded with
+    // distance. Perspective shrinks a far card to a fifth, which would leave a
+    // one-pixel line covering a fifth of a screen pixel: it flickers on and off
+    // as it drifts across the grid, and that is the flickering frame. Fading it
+    // out means there is nothing left back there to flicker.
+    edge.className = 'stream-edge';
+    edge.setAttribute('aria-hidden', 'true');
+    // The soft copy comes from the server already blurred and tiny. Blurring in
+    // CSS instead would cost a repaint every time perspective rescales the card,
+    // and that repaint is what made the frames flicker.
+    soft.className = 'stream-soft';
+    sharp.className = 'stream-sharp';
+    soft.decoding = sharp.decoding = 'async';
+    soft.alt = sharp.alt = '';
     caption.className = 'stream-caption';
     // A slot always keeps its place in the queue, so its stacking order is
-    // fixed. Stating it explicitly matters because a filtered element drops out
+    // fixed. Stating it explicitly matters because a blurred element drops out
     // of the 3D sorting and would otherwise paint in DOM order.
     figure.style.zIndex = String(STREAM_VISIBLE + 1 - i);
-    figure.append(image, caption);
+    shot.append(soft, sharp);
+    figure.append(shot, caption, edge);
     track.append(figure);
-    streamSlots.push({
-      node: figure, image, caption, photoId: null, index: null, blur: null, place: null,
-    });
+    const slot = {
+      node: figure,
+      shot,
+      soft,
+      sharp,
+      edge,
+      edgeOpacity: null,
+      caption,
+      photoId: null,
+      highlight: null,
+      index: null,
+      place: null,
+      sharpId: null,
+      sharpReady: false,
+      sharpOpacity: null,
+    };
+    sharp.addEventListener('load', () => { slot.sharpReady = true; });
+    // A photo that will not load must not leave a hole: the blurred copy stays
+    // put and the sharp layer simply never fades in.
+    sharp.addEventListener('error', () => { slot.sharpReady = false; });
+    streamSlots.push(slot);
   }
 }
 
@@ -2136,6 +2348,14 @@ function renderStreamCaption(slot, photo) {
     return;
   }
   const parts = [];
+  if (photo.highlight) {
+    const flag = document.createElement('span');
+    flag.className = 'stream-flag';
+    flag.textContent = photo.highlight === 'pinned'
+      ? '📌 Vom Gastgeber gepinnt'
+      : '🔥 Meistgefeiertes Foto';
+    parts.push(flag);
+  }
   if (photo.task) {
     const task = document.createElement('span');
     task.className = 'stream-task';
@@ -2175,13 +2395,32 @@ function paintStream() {
     if (slot.index !== index) {
       const photo = streamPlaylist[((index % streamPlaylist.length) + streamPlaylist.length) % streamPlaylist.length];
       if (slot.photoId !== photo.id) {
-        slot.image.src = `/api/photos/${photo.id}/display`;
+        slot.soft.src = `/api/photos/${photo.id}/soft`;
         slot.photoId = photo.id;
       }
-      renderStreamCaption(slot, streamPhotoById.get(photo.id) || photo);
+      // The same photo also comes round as an ordinary picture, so the frame
+      // belongs to this turn through the rotation, not to the photo itself.
+      if (slot.highlight !== (photo.highlight || null)) {
+        slot.highlight = photo.highlight || null;
+        slot.node.classList.toggle('is-highlight', Boolean(slot.highlight));
+        slot.node.classList.toggle('is-pinned', slot.highlight === 'pinned');
+      }
+      renderStreamCaption(slot, { ...(streamPhotoById.get(photo.id) || photo), highlight: slot.highlight });
       slot.place = streamPlacement(index);
       slot.node.style.setProperty('--tilt', `${slot.place.tilt}deg`);
       slot.index = index;
+    }
+    // Only the photos about to arrive are worth their full weight in pixels.
+    // The rest stay on the thumbnail, which is blurred anyway.
+    const wantsSharp = position < STREAM_SHARP_SLOTS;
+    if (wantsSharp && slot.sharpId !== slot.photoId) {
+      slot.sharpId = slot.photoId;
+      slot.sharpReady = false;
+      slot.sharp.src = `/api/photos/${slot.photoId}/display`;
+    } else if (!wantsSharp && slot.sharpId !== null) {
+      slot.sharpId = null;
+      slot.sharpReady = false;
+      slot.sharp.removeAttribute('src');
     }
     // Fade in from the far end, fade out again while passing the camera, so
     // nothing pops into or out of existence.
@@ -2210,17 +2449,31 @@ function paintStream() {
     slot.node.classList.toggle('is-front', position === 1);
 
     // Softening whatever is further back leaves the eye on the nearest photo.
-    // The blur is drawn before perspective shrinks the photo, so it is divided
-    // by the scale to keep the amount even once it reaches the screen.
-    const onScreen = Math.min(STREAM_BLUR_MAX, (Math.max(0, depth) / STREAM_SPACING) * STREAM_BLUR_RATE);
-    // Quantised, so the filter string rarely changes and the browser can keep
-    // its rasterised copy instead of re-blurring every frame.
-    // On the whole card, not just the photo: the frame and its caption have to
-    // recede with it, otherwise a distant photo sits in a razor-sharp frame.
-    const blur = streamQuality ? 0 : Math.round((onScreen / scale) * 4) / 4;
-    if (slot.blur !== blur) {
-      slot.node.style.filter = blur ? `blur(${blur}px)` : '';
-      slot.blur = blur;
+    // The soft copy underneath is blurred by a fixed amount that never changes,
+    // and the sharp copy is faded in on top of it as the photo arrives. Because
+    // only an opacity changes, this costs a compositor pass and nothing repaints
+    // -- which is what stopped the frames from flickering. The second photo is
+    // already halfway sharp while the first one is still leaving.
+    const focus = slot.sharpReady
+      ? Math.min(1, Math.max(0, 1 - depth / (STREAM_SPACING * STREAM_SHARP_REACH)))
+      : 0;
+    // Two decimals is finer than any screen resolves and saves a style write on
+    // most frames.
+    const sharpOpacity = Math.round(focus * 100) / 100;
+    if (slot.sharpOpacity !== sharpOpacity) {
+      slot.sharp.style.opacity = String(sharpOpacity);
+      slot.sharpOpacity = sharpOpacity;
+    }
+
+    // The frame fades out with distance rather than shrinking below a screen
+    // pixel. It reads as depth, and it is the reason the far frames no longer
+    // flicker. Quantised, because two dozen values are all the eye can tell
+    // apart and each one saves a style write.
+    const near = Math.min(1, Math.max(0, 1 - depth / (STREAM_SPACING * STREAM_EDGE_REACH)));
+    const edgeOpacity = Math.round(near * near * (3 - 2 * near) * 20) / 20;
+    if (slot.edgeOpacity !== edgeOpacity) {
+      slot.edge.style.opacity = String(edgeOpacity);
+      slot.edgeOpacity = edgeOpacity;
     }
   }
 }
@@ -2251,7 +2504,6 @@ function streamAdapt(now) {
   streamQuality += 1;
   $('stream-stage').classList.toggle('is-lean', streamQuality >= 1);
   $('stream-stage').classList.toggle('is-minimal', streamQuality >= 2);
-  for (const slot of streamSlots) slot.blur = null;
 }
 
 function streamFrame(now) {
@@ -2309,7 +2561,8 @@ async function loadStream() {
       if (!streamSlots.length) buildStreamSlots();
     }
     for (const slot of streamSlots) {
-      if (slot.photoId) renderStreamCaption(slot, streamPhotoById.get(slot.photoId));
+      const photo = slot.photoId && streamPhotoById.get(slot.photoId);
+      if (photo) renderStreamCaption(slot, { ...photo, highlight: slot.highlight });
     }
     $('stream-stage').hidden = !list.length;
     $('stream-empty').hidden = Boolean(list.length);

@@ -475,6 +475,73 @@ def test_admin_can_hide_photos_and_review_every_registered_user(tmp_path):
     assert hidden_user["photos"][0]["hidden"] is True
 
 
+def test_admin_pins_photos_onto_the_stream_and_takes_them_off_again(tmp_path):
+    store = LocalStore(tmp_path)
+    admin_device = str(uuid.uuid4())
+    epoch = hashlib.sha256(b"TESTCODE").hexdigest()
+    admin_key = hashlib.sha256(f"{epoch}:{admin_device}".encode()).hexdigest()
+    app = create_app(
+        Settings("TEST-CODE", "test-signing-key", True, (), ("d_" + admin_key[:12],)),
+        store,
+    )
+    admin = TestClient(app, base_url="https://testserver")
+    guest = TestClient(app, base_url="https://testserver")
+
+    login_device(admin, admin_device)
+    admin.post("/api/users/me", json={"name": "Alex"}, headers=ORIGIN)
+    login_device(guest, str(uuid.uuid4()))
+    guest.post("/api/users/me", json={"name": "Bea"}, headers=ORIGIN)
+    photo_id = str(uuid.uuid4())
+    assert upload(guest, photo_id=photo_id).status_code == 201
+
+    def streamed():
+        return {photo["id"]: photo for photo in guest.get("/api/photos/stream").json()["photos"]}
+
+    assert streamed()[photo_id]["pinned"] is False
+    assert streamed()[photo_id]["comments"] == 0
+
+    assert guest.post(
+        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
+    ).status_code == 403
+
+    pinned = admin.post(
+        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
+    )
+    assert pinned.status_code == 200
+    assert pinned.json() == {"id": photo_id, "pinned": True}
+    assert streamed()[photo_id]["pinned"] is True
+    assert guest.get("/api/photos").json()["photos"][0]["pinned"] is True
+
+    # A comment has to reach the stream, because the screens rank on it.
+    guest.post(f"/api/photos/{photo_id}/comments", json={"text": "Schön!"}, headers=ORIGIN)
+    assert streamed()[photo_id]["comments"] == 1
+
+    assert admin.post(
+        f"/api/admin/photos/{photo_id}/pin", json={"pinned": "ja"}, headers=ORIGIN
+    ).status_code == 400
+
+    unpinned = admin.post(
+        f"/api/admin/photos/{photo_id}/pin", json={"pinned": False}, headers=ORIGIN
+    )
+    assert unpinned.json() == {"id": photo_id, "pinned": False}
+    assert streamed()[photo_id]["pinned"] is False
+
+    # Nothing was overwritten: both decisions are still on record, newest wins.
+    assert len(store.list_prefix(f"pins/{photo_id}/")) == 2
+
+    assert admin.post(
+        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
+    ).json()["pinned"] is True
+    admin.post(f"/api/admin/photos/{photo_id}/hide", headers=ORIGIN)
+    assert photo_id not in streamed()
+    assert admin.post(
+        f"/api/admin/photos/{photo_id}/pin", json={"pinned": True}, headers=ORIGIN
+    ).status_code == 409
+    assert admin.post(
+        f"/api/admin/photos/{uuid.uuid4()!s}/pin", json={"pinned": True}, headers=ORIGIN
+    ).status_code == 404
+
+
 def test_users_can_add_tasks_and_admins_can_manage_them(tmp_path):
     store = LocalStore(tmp_path)
     admin_device = str(uuid.uuid4())
