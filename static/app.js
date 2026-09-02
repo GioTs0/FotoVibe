@@ -21,10 +21,12 @@ const DEVICE_STORAGE_KEY = 'fotovibe_device_id';
 const OUTBOX_MAX_ITEMS = 25;
 const OUTBOX_MAX_BYTES = 250 * 1024 * 1024;
 const OUTBOX_HEADROOM_BYTES = 20 * 1024 * 1024;
+const OUTBOX_UPLOAD_CONCURRENCY = 2;
 let cachedDeviceId = null;
 let authenticated = false;
 let currentUser = null;
 let selected = null;
+let selectedBytes = null;
 let directServerPhotoId = null;
 let previewUrl = null;
 let previewGeneration = 0;
@@ -209,12 +211,45 @@ function displayableBlob(value) {
   return value instanceof Blob && value.size > 0;
 }
 
+function storedBytesBlob(value, type) {
+  if (value instanceof ArrayBuffer && value.byteLength > 0) {
+    return new Blob([value], { type: type || 'application/octet-stream' });
+  }
+  if (ArrayBuffer.isView(value) && value.byteLength > 0) {
+    return new Blob([value], { type: type || 'application/octet-stream' });
+  }
+  return null;
+}
+
+function blobBytes(value) {
+  if (typeof value?.arrayBuffer === 'function') return value.arrayBuffer();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('Das Foto konnte nicht lokal vorbereitet werden.'));
+    reader.readAsArrayBuffer(value);
+  });
+}
+
+function queuePhotoBlob(entry) {
+  return displayableBlob(entry.blob)
+    ? entry.blob
+    : storedBytesBlob(entry.bytes, entry.type);
+}
+
+function queueThumbnailBlob(entry) {
+  return displayableBlob(entry.thumbnail)
+    ? entry.thumbnail
+    : storedBytesBlob(entry.thumbnailBytes, entry.thumbnailType || 'image/jpeg');
+}
+
 function queuePreviewUrl(entry) {
   const existing = queuePreviewUrls.get(entry.id);
   if (existing) return existing;
-  const preview = displayableBlob(entry.thumbnail)
-    ? entry.thumbnail
-    : displayableBlob(entry.blob) ? entry.blob : null;
+  if (typeof entry.thumbnailDataUrl === 'string' && entry.thumbnailDataUrl.startsWith('data:image/')) {
+    return entry.thumbnailDataUrl;
+  }
+  const preview = queueThumbnailBlob(entry) || queuePhotoBlob(entry);
   if (!preview) return null;
   const url = URL.createObjectURL(preview);
   queuePreviewUrls.set(entry.id, url);
@@ -256,7 +291,10 @@ function openQueueDetail(entry) {
   queueDetailId = entry.id;
   const image = $('queue-detail-image');
   const unavailable = $('queue-detail-image-unavailable');
-  const candidates = [entry.blob, entry.thumbnail].filter(displayableBlob);
+  const candidates = [queuePhotoBlob(entry), queueThumbnailBlob(entry)].filter(displayableBlob);
+  if (typeof entry.thumbnailDataUrl === 'string' && entry.thumbnailDataUrl.startsWith('data:image/')) {
+    candidates.push(entry.thumbnailDataUrl);
+  }
   const showCandidate = (index) => {
     if (queueDetailPreviewUrl) URL.revokeObjectURL(queueDetailPreviewUrl);
     queueDetailPreviewUrl = null;
@@ -266,7 +304,9 @@ function openQueueDetail(entry) {
       unavailable.hidden = false;
       return;
     }
-    queueDetailPreviewUrl = URL.createObjectURL(candidates[index]);
+    queueDetailPreviewUrl = typeof candidates[index] === 'string'
+      ? candidates[index]
+      : URL.createObjectURL(candidates[index]);
     image.hidden = false;
     unavailable.hidden = true;
     image.onerror = () => showCandidate(index + 1);
@@ -325,6 +365,8 @@ function queueEntryLabel(entry) {
   if (entry.status === 'uploading') return entry.progress > 0 ? `${entry.progress} %` : 'Lädt hoch';
   if (entry.status === 'blocked') return 'Anmelden';
   if (entry.status === 'error') return 'Fehler';
+  if ((entry.nextAttemptAt || 0) > Date.now() && entry.lastError) return 'Versucht erneut';
+  if (navigator.onLine === false) return 'Offline';
   return 'Wartet';
 }
 
@@ -505,7 +547,7 @@ function renderQueue() {
     line.append(stateIcon, ` ${queueEntryLabel(entry)}`);
     detail.append(line);
     let errorDetail = null;
-    if (entry.status === 'error') {
+    if (entry.lastError && (entry.status === 'error' || (entry.nextAttemptAt || 0) > Date.now())) {
       const error = document.createElement('p');
       error.className = 'queue-item-error';
       error.hidden = true;
@@ -551,10 +593,14 @@ function renderQueue() {
 async function repairLegacyOutbox(entries) {
   let requeued = false;
   for (const entry of entries) {
-    if (entry.status === 'error' && /Ungültige Foto-ID|Bitte genau ein Foto/i.test(entry.lastError || '')) {
+    if (
+      entry.status === 'error'
+      && !entry.automaticUploadRepairAttempted
+      && /Ungültige Foto-ID|Bitte genau ein Foto/i.test(entry.lastError || '')
+    ) {
       await updateOutboxEntry(entry.id, {
         status: 'queued', attempts: 0, nextAttemptAt: 0, lastError: '', progress: 0,
-        serverPhotoId: null, uploadId: null,
+        serverPhotoId: null, uploadId: null, automaticUploadRepairAttempted: true,
       });
       requeued = true;
     }
@@ -604,57 +650,85 @@ function scheduleQueueSync() {
 
 async function syncOutbox() {
   if (queueSyncing || !authenticated || !currentUser || locallySignedOut) return;
-  if (!(await acquireUploadLease(queueOwner))) return;
   queueSyncing = true;
+  let hasLease = false;
+  try { hasLease = await acquireUploadLease(queueOwner); } catch {}
+  if (!hasLease) {
+    queueSyncing = false;
+    return;
+  }
   const leaseRenewal = setInterval(() => { void acquireUploadLease(queueOwner); }, 10_000);
   try {
-    for (let entry of await listOutbox()) {
-      if (entry.status !== 'queued' || (entry.nextAttemptAt || 0) > Date.now()) continue;
-      if (!displayableBlob(entry.blob)) {
-        await updateOutboxEntry(entry.id, {
-          status: 'error', progress: 0,
-          lastError: 'Das lokal gespeicherte Foto fehlt. Bitte aus der Liste löschen.',
-        });
-        await refreshOutbox();
-        continue;
-      }
-      entry = await prepareOutboxEntry(entry);
-      await updateOutboxEntry(entry.id, { status: 'uploading', progress: 0 });
-      await refreshOutbox();
-      try {
-        const result = await sendPhoto(entry.blob, entry.serverPhotoId, entry.task, entry.clientMetadata, async (progress) => {
-          await updateOutboxEntry(entry.id, { progress });
-          await refreshOutbox();
-        });
-        await deleteOutboxEntry(entry.id);
-        if (result.created && currentUser?.values) {
-          showUser({ ...currentUser, values: { ...currentUser.values, photos_uploaded: (currentUser.values.photos_uploaded || 0) + 1 } });
-          void setOfflineState('user', currentUser);
-        }
-        await refreshOutbox();
-      } catch (error) {
-        const attempts = (entry.attempts || 0) + 1;
-        if (error.status === 401) {
-          await updateOutboxEntry(entry.id, { status: 'blocked', attempts, progress: 0, lastError: 'Bitte anmelden.' });
-          showLogin('Bitte melde dich erneut an, damit deine Fotos geteilt werden können.');
-        } else if (error.network || error.status === 429 || error.status >= 500) {
-          const delay = error.retryAfter || Math.min(300000, 5000 * (2 ** Math.min(attempts, 6)));
-          await updateOutboxEntry(entry.id, {
-            status: 'queued', attempts, progress: 0, lastError: error.message,
-            nextAttemptAt: Date.now() + delay,
-          });
-        } else {
-          await updateOutboxEntry(entry.id, { status: 'error', attempts, progress: 0, lastError: error.message });
-        }
-        await refreshOutbox();
-        break;
-      }
+    const entries = (await listOutbox()).filter(
+      (entry) => entry.status === 'queued' && (entry.nextAttemptAt || 0) <= Date.now(),
+    );
+    for (let index = 0; index < entries.length; index += OUTBOX_UPLOAD_CONCURRENCY) {
+      const batch = entries.slice(index, index + OUTBOX_UPLOAD_CONCURRENCY);
+      const stops = await Promise.all(batch.map(uploadOutboxEntry));
+      if (stops.some(Boolean)) break;
     }
   } finally {
     clearInterval(leaseRenewal);
     queueSyncing = false;
     await releaseUploadLease(queueOwner);
     await refreshOutbox();
+  }
+}
+
+async function uploadOutboxEntry(candidate) {
+  let entry = candidate;
+  const photo = queuePhotoBlob(entry);
+  if (!displayableBlob(photo)) {
+    await updateOutboxEntry(entry.id, {
+      status: 'error', progress: 0,
+      lastError: 'Das lokal gespeicherte Foto fehlt. Bitte aus der Liste löschen.',
+    });
+    await refreshOutbox();
+    return false;
+  }
+  entry = await prepareOutboxEntry(entry);
+  await updateOutboxEntry(entry.id, { status: 'uploading', progress: 0 });
+  await refreshOutbox();
+  let shownProgress = -1;
+  try {
+    const result = await sendPhoto(
+      photo,
+      entry.serverPhotoId,
+      entry.task,
+      entry.clientMetadata,
+      async (progress) => {
+        if (progress < 100 && progress - shownProgress < 5) return;
+        shownProgress = progress;
+        await updateOutboxEntry(entry.id, { progress });
+        await refreshOutbox();
+      },
+    );
+    await deleteOutboxEntry(entry.id);
+    if (result.created && currentUser?.values) {
+      showUser({ ...currentUser, values: { ...currentUser.values, photos_uploaded: (currentUser.values.photos_uploaded || 0) + 1 } });
+      void setOfflineState('user', currentUser);
+    }
+    await refreshOutbox();
+    return false;
+  } catch (error) {
+    const attempts = (entry.attempts || 0) + 1;
+    let shouldStop = false;
+    if (error.status === 401) {
+      await updateOutboxEntry(entry.id, { status: 'blocked', attempts, progress: 0, lastError: 'Bitte anmelden.' });
+      showLogin('Bitte melde dich erneut an, damit deine Fotos geteilt werden können.');
+      shouldStop = true;
+    } else if (error.network || error.status === 429 || error.status >= 500) {
+      const delay = error.retryAfter || Math.min(300000, 5000 * (2 ** Math.min(attempts, 6)));
+      await updateOutboxEntry(entry.id, {
+        status: 'queued', attempts, progress: 0, lastError: error.message,
+        nextAttemptAt: Date.now() + delay,
+      });
+      shouldStop = true;
+    } else {
+      await updateOutboxEntry(entry.id, { status: 'error', attempts, progress: 0, lastError: error.message });
+    }
+    await refreshOutbox();
+    return shouldStop;
   }
 }
 
@@ -680,16 +754,17 @@ async function queueThumbnail() {
   canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
   canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
   canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.72));
+  return canvas.toDataURL('image/jpeg', 0.72);
 }
 
 async function queueSelectedPhoto() {
   await ensureOutboxCapacity(selected);
-  const thumbnail = await queueThumbnail();
+  const thumbnailDataUrl = await queueThumbnail();
+  const bytes = selectedBytes || await blobBytes(selected);
   const entry = {
     id: crypto.randomUUID(),
-    blob: selected,
-    thumbnail,
+    bytes,
+    thumbnailDataUrl,
     name: selected.name,
     type: selected.type,
     size: selected.size,
@@ -1553,6 +1628,7 @@ async function captureCameraPhoto() {
 function clearSelection() {
   previewGeneration++;
   selected = null;
+  selectedBytes = null;
   directServerPhotoId = null;
   selectedTask = null;
   selectedUploadMetadata = null;
@@ -1624,8 +1700,12 @@ async function selectPhoto(file, source = 'library', mirrored = false) {
     queued_at: Date.now(),
     ...(selectedTask?.id ? { task_id: selectedTask.id } : {}),
   };
+  const bytesPromise = blobBytes(file);
   let url = URL.createObjectURL(file);
   try {
+    const bytes = await bytesPromise;
+    if (generation !== previewGeneration) { URL.revokeObjectURL(url); return; }
+    selectedBytes = bytes;
     let image;
     try { image = await decodeImage(url); }
     catch {
@@ -1665,12 +1745,11 @@ function sendPhoto(file, id, task, clientMetadata, onProgress = () => {}) {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/photos');
     xhr.timeout = 300000;
-    const data = new FormData();
-    data.append('upload_id', id);
-    if (task?.task_token) data.append('task_token', task.task_token);
-    else if (task?.id) data.append('task_id', task.id);
-    if (clientMetadata) data.append('client_metadata', JSON.stringify(clientMetadata));
-    data.append('photo', file);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    if (id) xhr.setRequestHeader('X-FotoVibe-Upload-ID', id);
+    if (task?.task_token) xhr.setRequestHeader('X-FotoVibe-Task-Token', task.task_token);
+    else if (task?.id) xhr.setRequestHeader('X-FotoVibe-Task-ID', task.id);
+    if (clientMetadata) xhr.setRequestHeader('X-FotoVibe-Client-Metadata', JSON.stringify(clientMetadata));
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
       const value = Math.round(event.loaded / event.total * 100);
@@ -1696,7 +1775,9 @@ function sendPhoto(file, id, task, clientMetadata, onProgress = () => {}) {
       error.network = true;
       reject(error);
     };
-    xhr.send(data);
+    // Sending the Blob as the request body avoids Safari's inconsistent
+    // multipart serialization for Blobs restored from IndexedDB.
+    xhr.send(file);
   });
 }
 
@@ -1730,10 +1811,16 @@ $('send').addEventListener('click', async () => {
       $('progress-text').textContent = 'Foto wird übertragen …';
       try {
         directServerPhotoId ||= crypto.randomUUID();
-        const result = await sendPhoto(selected, directServerPhotoId, selectedTask, selectedUploadMetadata, (value) => {
-          $('progress').value = value;
-          $('progress-text').textContent = value < 100 ? `Foto wird übertragen: ${value} %` : 'Foto wird gespeichert …';
-        });
+        const result = await sendPhoto(
+          selected,
+          directServerPhotoId,
+          selectedTask,
+          selectedUploadMetadata,
+          (value) => {
+            $('progress').value = value;
+            $('progress-text').textContent = value < 100 ? `Foto wird übertragen: ${value} %` : 'Foto wird gespeichert …';
+          },
+        );
         if (result.created && currentUser?.values) {
           showUser({ ...currentUser, values: { ...currentUser.values, photos_uploaded: (currentUser.values.photos_uploaded || 0) + 1 } });
           void setOfflineState('user', currentUser);

@@ -176,6 +176,59 @@ test('an old failed queue entry gets a fresh server photo ID before upload', asy
   await expect(page.locator('#local-cache')).toBeHidden();
 });
 
+test('an automatic legacy repair runs only once when the server still rejects it', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises the one-shot queue repair once in Chromium.');
+  await page.goto('/');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Reparaturschutz');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  await page.waitForFunction(() => navigator.serviceWorker?.controller);
+  await page.evaluate(async () => {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map((registration) => registration.unregister()));
+  });
+  let requests = 0;
+  await page.route('**/api/photos', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    requests += 1;
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Bitte genau ein Foto auswählen.' }),
+    });
+  });
+  await page.evaluate(async () => {
+    const blob = await fetch('/static/party.jpg').then((response) => response.blob());
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('fotovibe-offline', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('outbox', 'readwrite');
+      transaction.objectStore('outbox').put({
+        id: 'one-shot-repair', uploadId: 'old-local-key', blob, name: 'legacy.jpg',
+        type: 'image/jpeg', size: blob.size, createdAt: Date.now(), updatedAt: Date.now(),
+        status: 'error', attempts: 1, nextAttemptAt: 0,
+        lastError: 'Bitte genau ein Foto auswählen.', progress: 0,
+      });
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    window.dispatchEvent(new Event('offline'));
+  });
+
+  await expect(page.locator('#queue-button')).toHaveAttribute('data-state', 'error');
+  await page.waitForTimeout(500);
+  expect(requests).toBe(1);
+});
+
 test('a full offline queue of 25 task photos drains with its metadata intact', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises the maximum outbox size once in Chromium.');
   await page.goto('/');
@@ -238,6 +291,75 @@ test('a full offline queue of 25 task photos drains with its metadata intact', a
   expect(uploaded.every((photo) => photo.metadata.task?.id && photo.metadata.capture?.source === 'camera')).toBe(true);
 });
 
+test('the page starts two queued uploads at a time', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'Checks the page queue scheduler once in Chromium.');
+  await page.goto('/');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Parallel Queue');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  await page.evaluate(async () => {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map((registration) => registration.unregister()));
+    window.__uploadActivity = { active: 0, maximum: 0 };
+    window.XMLHttpRequest = class FakeUploadRequest {
+      constructor() {
+        this.upload = {};
+        this.status = 0;
+        this.responseText = '';
+      }
+
+      open() {}
+
+      setRequestHeader() {}
+
+      getResponseHeader() { return null; }
+
+      send(body) {
+        if (!(body instanceof Blob)) throw new Error('Expected one raw photo Blob.');
+        window.__uploadActivity.active += 1;
+        window.__uploadActivity.maximum = Math.max(
+          window.__uploadActivity.maximum,
+          window.__uploadActivity.active,
+        );
+        this.upload.onprogress?.({ lengthComputable: true, loaded: body.size, total: body.size });
+        setTimeout(() => {
+          window.__uploadActivity.active -= 1;
+          this.status = 201;
+          this.responseText = '{}';
+          this.onload();
+        }, 200);
+      }
+    };
+
+    const blob = await fetch('/static/party.jpg').then((response) => response.blob());
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('fotovibe-offline', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('outbox', 'readwrite');
+      const outbox = transaction.objectStore('outbox');
+      for (let index = 0; index < 4; index++) {
+        outbox.put({
+          id: `parallel-${index}`, blob, name: `parallel-${index}.jpg`, type: 'image/jpeg',
+          size: blob.size, createdAt: Date.now() + index, updatedAt: Date.now() + index,
+          status: 'queued', attempts: 0, nextAttemptAt: 0, lastError: '', progress: 0,
+        });
+      }
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    window.dispatchEvent(new Event('online'));
+  });
+
+  await expect(page.locator('#queue-control')).toBeHidden({ timeout: 10_000 });
+  expect(await page.evaluate(() => window.__uploadActivity.maximum)).toBe(2);
+});
+
 test('a broken local preview shows a calm placeholder and can still be removed', async ({ page, context }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chromium', 'Exercises an unreadable local Blob once in Chromium.');
   await page.goto('/');
@@ -277,6 +399,53 @@ test('a broken local preview shows a calm placeholder and can still be removed',
   await page.getByRole('button', { name: 'Foto aus der Queue löschen' }).click();
   await page.getByRole('button', { name: 'Löschen', exact: true }).click();
   await expect(page.locator('#queue-detail')).toBeHidden();
+});
+
+test('WebKit stores photo bytes offline and uploads them as a raw photo body', async ({ page, context }, testInfo) => {
+  test.skip(testInfo.project.name !== 'mobile-webkit', 'Covers the Safari offline photo path once in WebKit.');
+  await page.goto('/');
+  await page.getByLabel('Party-Code').fill('1234');
+  await page.getByRole('button', { name: /Dabei sein/ }).click();
+  await page.getByLabel('Dein Name').fill('Playwright Safari Queue');
+  await page.getByRole('button', { name: /Weiter zur Party/ }).click();
+  const photo = await readFile(new URL('../../static/party.jpg', import.meta.url));
+  await page.locator('#library-input').setInputFiles({
+    name: 'safari-offline.jpg', mimeType: 'image/jpeg', buffer: photo,
+  });
+  await expect(page.getByRole('button', { name: 'Foto hochladen' })).toBeVisible();
+  await context.setOffline(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+  await expect(page.getByRole('button', { name: 'Später hochladen' })).toBeVisible();
+  await page.getByRole('button', { name: 'Später hochladen' }).click();
+  await expect(page.locator('#local-cache')).toContainText('1 / 25 vorgemerkt');
+  const stored = await page.evaluate(async () => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('fotovibe-offline', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const entry = await new Promise((resolve, reject) => {
+      const request = database.transaction('outbox', 'readonly').objectStore('outbox').getAll();
+      request.onsuccess = () => resolve(request.result[0]);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return {
+      hasBytes: entry.bytes instanceof ArrayBuffer && entry.bytes.byteLength > 0,
+      hasBlob: 'blob' in entry,
+      queuedAt: entry.clientMetadata.queued_at,
+    };
+  });
+  expect(stored).toMatchObject({ hasBytes: true, hasBlob: false });
+
+  await context.setOffline(false);
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(page.locator('#queue-control')).toBeHidden({ timeout: 15_000 });
+  const uploaded = await page.evaluate(async (queuedAt) => {
+    const result = await fetch('/api/photos').then((response) => response.json());
+    return result.photos.find((photo) => photo.metadata?.capture?.queued_at === queuedAt);
+  }, stored.queuedAt);
+  expect(uploaded?.id).toMatch(/^[0-9a-f-]{36}$/);
 });
 
 test('the front-camera preview mirrors only the preview and keeps the action focused', async ({ page, browserName }, testInfo) => {

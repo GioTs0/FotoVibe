@@ -1,9 +1,9 @@
-const CACHE = 'fotovibe-shell-v5';
+const CACHE = 'fotovibe-shell-v7';
 const SHELL = [
   '/',
   '/static/index.html',
   '/static/style.css',
-  '/static/app.js?v=offline-upload-id-v5',
+  '/static/app.js?v=raw-offline-upload-v7',
   '/static/offline-store.js',
   '/static/vendor/heic-to.js',
   '/static/party.jpg',
@@ -13,6 +13,7 @@ const SHELL = [
   '/manifest.webmanifest',
 ];
 const DATABASE = 'fotovibe-offline';
+const UPLOAD_CONCURRENCY = 2;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 self.addEventListener('install', (event) => {
@@ -158,6 +159,17 @@ function finiteTimestamp(value, fallback) {
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
+function storedPhotoBlob(entry) {
+  if (entry.blob instanceof Blob && entry.blob.size) return entry.blob;
+  if (entry.bytes instanceof ArrayBuffer && entry.bytes.byteLength) {
+    return new Blob([entry.bytes], { type: entry.type || 'application/octet-stream' });
+  }
+  if (ArrayBuffer.isView(entry.bytes) && entry.bytes.byteLength) {
+    return new Blob([entry.bytes], { type: entry.type || 'application/octet-stream' });
+  }
+  return null;
+}
+
 async function prepareEntry(entry) {
   const patch = {};
   if (!validUploadId(entry.serverPhotoId)) {
@@ -178,29 +190,31 @@ async function prepareEntry(entry) {
 }
 
 async function uploadEntry(entry) {
-  if (!(entry.blob instanceof Blob) || !entry.blob.size) {
+  const photo = storedPhotoBlob(entry);
+  if (!(photo instanceof Blob) || !photo.size) {
     await updateEntry(entry.id, {
       status: 'error', progress: 0,
       lastError: 'Das lokal gespeicherte Foto fehlt. Bitte aus der Liste löschen.',
     });
     return false;
   }
-  const form = new FormData();
-  form.append('upload_id', entry.serverPhotoId);
-  if (entry.task?.task_token) form.append('task_token', entry.task.task_token);
-  else if (entry.task?.id) form.append('task_id', entry.task.id);
-  if (entry.clientMetadata) form.append('client_metadata', JSON.stringify(entry.clientMetadata));
-  form.append('photo', entry.blob, entry.name || 'foto.jpg');
-  const response = await fetch('/api/photos', { method: 'POST', body: form, credentials: 'same-origin' });
+  const headers = new Headers({ 'Content-Type': photo.type || 'application/octet-stream' });
+  if (entry.serverPhotoId) headers.set('X-FotoVibe-Upload-ID', entry.serverPhotoId);
+  if (entry.task?.task_token) headers.set('X-FotoVibe-Task-Token', entry.task.task_token);
+  else if (entry.task?.id) headers.set('X-FotoVibe-Task-ID', entry.task.id);
+  if (entry.clientMetadata) headers.set('X-FotoVibe-Client-Metadata', JSON.stringify(entry.clientMetadata));
+  const response = await fetch('/api/photos', {
+    method: 'POST', body: photo, headers, credentials: 'same-origin',
+  });
   if (response.ok) {
     await deleteEntry(entry.id);
-    return true;
+    return false;
   }
   const message = await responseMessage(response);
   const attempts = (entry.attempts || 0) + 1;
   if (response.status === 401) {
     await updateEntry(entry.id, { status: 'blocked', attempts, lastError: message, progress: 0 });
-    return false;
+    return true;
   }
   if (response.status === 429 || response.status >= 500) {
     const retryAfter = retryAfterMilliseconds(response.headers.get('Retry-After'));
@@ -208,10 +222,26 @@ async function uploadEntry(entry) {
     await updateEntry(entry.id, {
       status: 'queued', attempts, lastError: message, progress: 0, nextAttemptAt: Date.now() + delay,
     });
-    return false;
+    return true;
   }
   await updateEntry(entry.id, { status: 'error', attempts, lastError: message, progress: 0 });
   return false;
+}
+
+async function processEntry(candidate) {
+  let entry = await prepareEntry(candidate);
+  await updateEntry(entry.id, { status: 'uploading', progress: null });
+  try {
+    return await uploadEntry(entry);
+  } catch {
+    const attempts = (entry.attempts || 0) + 1;
+    await updateEntry(entry.id, {
+      status: 'queued', attempts, progress: 0,
+      lastError: 'Keine Verbindung.',
+      nextAttemptAt: Date.now() + Math.min(300_000, 5_000 * (2 ** Math.min(attempts, 6))),
+    });
+    return true;
+  }
 }
 
 async function drainOutbox() {
@@ -220,22 +250,14 @@ async function drainOutbox() {
   if (!(await acquireLease(owner))) return;
   const leaseRenewal = setInterval(() => { void acquireLease(owner); }, 10_000);
   try {
-    for (let entry of await listEntries()) {
-      if (!['queued', 'uploading'].includes(entry.status) || (entry.nextAttemptAt || 0) > Date.now()) continue;
-      entry = await prepareEntry(entry);
-      await updateEntry(entry.id, { status: 'uploading', progress: null });
-      try {
-        const completed = await uploadEntry(entry);
-        if (!completed) break;
-      } catch {
-        const attempts = (entry.attempts || 0) + 1;
-        await updateEntry(entry.id, {
-          status: 'queued', attempts, progress: 0,
-          lastError: 'Keine Verbindung.',
-          nextAttemptAt: Date.now() + Math.min(300_000, 5_000 * (2 ** Math.min(attempts, 6))),
-        });
-        break;
-      }
+    const entries = (await listEntries()).filter(
+      (entry) => ['queued', 'uploading'].includes(entry.status)
+        && (entry.nextAttemptAt || 0) <= Date.now(),
+    );
+    for (let index = 0; index < entries.length; index += UPLOAD_CONCURRENCY) {
+      const batch = entries.slice(index, index + UPLOAD_CONCURRENCY);
+      const stops = await Promise.all(batch.map(processEntry));
+      if (stops.some(Boolean)) break;
     }
   } finally {
     clearInterval(leaseRenewal);

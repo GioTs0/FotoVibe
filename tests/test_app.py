@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +13,7 @@ from google.api_core.exceptions import ServiceUnavailable
 from PIL import Image
 from pillow_heif import register_heif_opener
 
+import fotovibe.app as app_module
 from fotovibe.app import COOKIE, Settings, create_app
 from fotovibe.storage import LocalStore
 
@@ -117,6 +119,33 @@ def upload(
         headers=ORIGIN,
         data=fields,
         files={"photo": ("photo.jpg", data if data is not None else picture(), "image/jpeg")},
+    )
+
+
+def raw_upload(
+    client,
+    data=None,
+    photo_id=None,
+    task_id=None,
+    task_token=None,
+    client_metadata=None,
+    content_type="image/jpeg",
+):
+    headers = {
+        **ORIGIN,
+        "Content-Type": content_type,
+        "X-FotoVibe-Upload-ID": photo_id or str(uuid.uuid4()),
+    }
+    if task_id is not None:
+        headers["X-FotoVibe-Task-ID"] = task_id
+    if task_token is not None:
+        headers["X-FotoVibe-Task-Token"] = task_token
+    if client_metadata is not None:
+        headers["X-FotoVibe-Client-Metadata"] = json.dumps(client_metadata)
+    return client.post(
+        "/api/photos",
+        headers=headers,
+        content=data if data is not None else picture(),
     )
 
 
@@ -691,6 +720,54 @@ def test_offline_upload_metadata_keeps_task_link_and_capture_snapshot(tmp_path):
     assert upload(client, task_token=task["task_token"], client_metadata=wrong_task).status_code == 400
 
 
+def test_raw_offline_upload_keeps_id_task_metadata_and_retry_safety(tmp_path):
+    tasks = TestTaskStore([{"id": "safari", "text": "Mach ein Gruppenfoto."}])
+    store = LocalStore(tmp_path)
+    client = TestClient(
+        create_app(Settings("TEST-CODE", "test-signing-key"), store, tasks),
+        base_url="https://testserver",
+    )
+    login(client)
+    task = client.get("/api/tasks").json()["tasks"][0]
+    photo_id = str(uuid.uuid4())
+    raw = picture()
+    capture = {
+        "source": "camera",
+        "captured_at": 1_700_000_000_000,
+        "queued_at": 1_700_000_001_000,
+        "task_id": task["id"],
+    }
+
+    created = raw_upload(
+        client,
+        raw,
+        photo_id,
+        task_token=task["task_token"],
+        client_metadata=capture,
+    )
+    repeated = raw_upload(
+        client,
+        raw,
+        photo_id,
+        task_token=task["task_token"],
+        client_metadata=capture,
+    )
+
+    assert created.status_code == 201
+    assert repeated.status_code == 200
+    assert created.json()["id"] == photo_id
+    assert created.json()["metadata"]["task"] == {
+        "id": "safari",
+        "text": "Mach ein Gruppenfoto.",
+    }
+    assert created.json()["metadata"]["capture"] == {
+        "source": "camera",
+        "captured_at": 1_700_000_000_000,
+        "queued_at": 1_700_000_001_000,
+    }
+    assert len(store.published()) == 1
+
+
 def test_full_offline_outbox_of_25_photos_drains_with_task_and_capture_metadata(tmp_path):
     tasks = TestTaskStore([{"id": "abend", "text": "Mach ein Gruppenfoto."}])
     store = LocalStore(tmp_path)
@@ -904,6 +981,29 @@ def test_concurrent_duplicate_uploads_across_instances(env):
         responses = list(pool.map(lambda c: upload(c, photo_id=photo_id), [client, other]))
     assert sorted(response.status_code for response in responses) == [200, 201]
     assert len(store.published()) == 1
+
+
+def test_different_photo_conversions_run_in_parallel(tmp_path, monkeypatch):
+    original_derivatives = app_module.derivatives
+    conversions_started = threading.Barrier(2)
+
+    def synchronized_derivatives(raw):
+        conversions_started.wait(timeout=5)
+        return original_derivatives(raw)
+
+    monkeypatch.setattr(app_module, "derivatives", synchronized_derivatives)
+    app = create_app(Settings("TEST-CODE", "test-signing-key"), LocalStore(tmp_path))
+    clients = [
+        TestClient(app, base_url="https://testserver"),
+        TestClient(app, base_url="https://testserver"),
+    ]
+    for client in clients:
+        login(client)
+
+    with ThreadPoolExecutor(2) as pool:
+        responses = list(pool.map(raw_upload, clients))
+
+    assert [response.status_code for response in responses] == [201, 201]
 
 
 def test_login_rate_limit(env):

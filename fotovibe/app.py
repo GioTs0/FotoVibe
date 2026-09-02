@@ -11,6 +11,7 @@ import time
 import unicodedata
 import uuid
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -341,12 +342,31 @@ def create_app(settings=None, store=None, task_store=None):
     )
     epoch = hashlib.sha256(code.encode()).hexdigest()
     limiter = RateLimiter()
-    conversion_lock = threading.Lock()
+    conversion_locks_guard = threading.Lock()
+    conversion_locks = {}
     cache_lock = threading.Lock()
     cache = {"until": 0, "photos": []}
     app.state.serializer = serializer
     app.state.store = store
     app.state.task_store = task_store
+
+    @contextmanager
+    def photo_conversion_lock(photo_id):
+        """Serialize retries of one photo while allowing other photos in parallel."""
+        with conversion_locks_guard:
+            lock, users = conversion_locks.get(photo_id, (threading.Lock(), 0))
+            conversion_locks[photo_id] = (lock, users + 1)
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            with conversion_locks_guard:
+                current_lock, users = conversion_locks[photo_id]
+                if users == 1:
+                    del conversion_locks[photo_id]
+                else:
+                    conversion_locks[photo_id] = (current_lock, users - 1)
 
     def session_data(request):
         try:
@@ -881,6 +901,20 @@ def create_app(settings=None, store=None, task_store=None):
             {"detail": "Der Dienst ist gerade nicht erreichbar. Bitte erneut versuchen."}, 503
         )
 
+    @app.exception_handler(HTTPException)
+    async def application_error(request, error):
+        if request.url.path == "/api/photos":
+            log.warning(
+                "photo_upload_rejected status=%s detail=%s",
+                error.status_code,
+                error.detail,
+            )
+        return JSONResponse(
+            {"detail": error.detail},
+            status_code=error.status_code,
+            headers=error.headers,
+        )
+
     @app.get("/healthz")
     def health():
         return {"status": "ok"}
@@ -1270,7 +1304,7 @@ def create_app(settings=None, store=None, task_store=None):
         metadata_digest = hashlib.sha256(
             json.dumps(photo_metadata, sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()
-        with conversion_lock:
+        with photo_conversion_lock(photo_id):
             original_key = f"photos/{photo_id}/original"
             existing = store.info(original_key)
             if existing and existing.metadata.get("sha256") != digest:
@@ -1360,53 +1394,67 @@ def create_app(settings=None, store=None, task_store=None):
         # drain in one minute, plus a few idempotent retries, without removing
         # the per-session abuse guard.
         limiter.check("upload:" + sid, 30)
-        async with request.form(max_files=1, max_fields=4, max_part_size=8192) as form:
-            allowed_fields = {
-                "photo", "upload_id", "task_id", "task_token", "client_metadata"
-            }
-            if set(form.keys()) - allowed_fields:
-                raise HTTPException(400, "Die Upload-Daten sind ungültig.")
+        media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        if media_type.startswith("image/") or media_type == "application/octet-stream":
+            # Current offline clients send the Blob directly. This avoids a
+            # WebKit bug where an IndexedDB-restored Blob can lose its file
+            # disposition while Safari creates multipart/form-data.
+            queued_upload_id = request.headers.get("x-fotovibe-upload-id")
+            task_id = request.headers.get("x-fotovibe-task-id")
+            task_token = request.headers.get("x-fotovibe-task-token")
+            client_metadata = request.headers.get("x-fotovibe-client-metadata")
+            raw = await request.body()
+        else:
+            # Multipart stays available for installed older clients and API
+            # compatibility. New clients no longer depend on this Safari path.
+            async with request.form(max_files=1, max_fields=4, max_part_size=8192) as form:
+                allowed_fields = {
+                    "photo", "upload_id", "task_id", "task_token", "client_metadata"
+                }
+                if set(form.keys()) - allowed_fields:
+                    raise HTTPException(400, "Die Upload-Daten sind ungültig.")
 
-            photo_values = form.getlist("photo")
-            upload_id_values = form.getlist("upload_id")
-            task_id_values = form.getlist("task_id")
-            task_token_values = form.getlist("task_token")
-            client_metadata_values = form.getlist("client_metadata")
-            optional_values = [
-                upload_id_values, task_id_values, task_token_values, client_metadata_values
-            ]
-            if len(photo_values) != 1 or not isinstance(photo_values[0], UploadFile):
-                raise HTTPException(400, "Bitte genau ein Foto auswählen.")
-            if any(len(value) > 1 for value in optional_values) or any(
-                value and not isinstance(value[0], str) for value in optional_values
-            ):
-                raise HTTPException(400, "Die Upload-Daten sind ungültig.")
+                photo_values = form.getlist("photo")
+                upload_id_values = form.getlist("upload_id")
+                task_id_values = form.getlist("task_id")
+                task_token_values = form.getlist("task_token")
+                client_metadata_values = form.getlist("client_metadata")
+                optional_values = [
+                    upload_id_values, task_id_values, task_token_values, client_metadata_values
+                ]
+                if len(photo_values) != 1 or not isinstance(photo_values[0], UploadFile):
+                    raise HTTPException(400, "Bitte genau ein Foto auswählen.")
+                if any(len(value) > 1 for value in optional_values) or any(
+                    value and not isinstance(value[0], str) for value in optional_values
+                ):
+                    raise HTTPException(400, "Die Upload-Daten sind ungültig.")
 
-            photo = photo_values[0]
-            queued_upload_id = upload_id_values[0] if upload_id_values else None
-            task_id = task_id_values[0] if task_id_values else None
-            task_token = task_token_values[0] if task_token_values else None
-            client_metadata = client_metadata_values[0] if client_metadata_values else None
-            task = await run_in_threadpool(resolve_task, task_id, task_token)
-            capture = capture_metadata(client_metadata)
-            capture_task_id = capture.pop("task_id", None) if capture else None
-            if capture_task_id is not None and (not task or capture_task_id != task["id"]):
-                raise HTTPException(400, "Die Foto-Aufgabe passt nicht zum Foto.")
-            raw = await photo.read(MAX_BYTES + 1)
-            if not raw:
-                raise HTTPException(400, "Die Datei ist leer.")
-            if len(raw) > MAX_BYTES:
-                raise HTTPException(413, "Das Foto ist zu groß (maximal 25 MiB).")
-            photo_id = upload_photo_id(queued_upload_id, data["device"])
-            photo_metadata = {"task": task} if task else {}
-            if capture:
-                photo_metadata["capture"] = capture
-            author = user_for_device(data["device"])
-            if author:
-                photo_metadata["author"] = author
-            record, created = await run_in_threadpool(persist, raw, photo_id, photo_metadata)
-            if author:
-                await run_in_threadpool(record_user_upload, data["device"], photo_id)
+                photo = photo_values[0]
+                queued_upload_id = upload_id_values[0] if upload_id_values else None
+                task_id = task_id_values[0] if task_id_values else None
+                task_token = task_token_values[0] if task_token_values else None
+                client_metadata = client_metadata_values[0] if client_metadata_values else None
+                raw = await photo.read(MAX_BYTES + 1)
+
+        if not raw:
+            raise HTTPException(400, "Die Datei ist leer.")
+        if len(raw) > MAX_BYTES:
+            raise HTTPException(413, "Das Foto ist zu groß (maximal 25 MiB).")
+        task = await run_in_threadpool(resolve_task, task_id, task_token)
+        capture = capture_metadata(client_metadata)
+        capture_task_id = capture.pop("task_id", None) if capture else None
+        if capture_task_id is not None and (not task or capture_task_id != task["id"]):
+            raise HTTPException(400, "Die Foto-Aufgabe passt nicht zum Foto.")
+        photo_id = upload_photo_id(queued_upload_id, data["device"])
+        photo_metadata = {"task": task} if task else {}
+        if capture:
+            photo_metadata["capture"] = capture
+        author = user_for_device(data["device"])
+        if author:
+            photo_metadata["author"] = author
+        record, created = await run_in_threadpool(persist, raw, photo_id, photo_metadata)
+        if author:
+            await run_in_threadpool(record_user_upload, data["device"], photo_id)
         return JSONResponse(record, status_code=201 if created else 200)
 
     @app.get("/api/photos")
