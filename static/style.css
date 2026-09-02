@@ -19,19 +19,17 @@
 @media(max-width:700px){.admin-heading{display:block}.admin-heading>#admin-back{margin-top:1.25rem}.admin-user-metrics{gap:1rem}.admin-hide-action{display:flex;width:100%;margin:1rem 0 0}}
 .task-add-open{width:100%;margin-top:1rem;justify-content:flex-start}.task-add-form{display:grid;gap:.6rem;margin:.85rem 0 0}.task-add-form label,.admin-task-create label{margin:0;font-size:.82rem}.task-add-form textarea,.admin-task textarea,.admin-task-create textarea{width:100%;resize:vertical;padding:.7rem .8rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);line-height:1.4}.task-add-actions{display:flex;align-items:center;gap:.4rem}.task-add-actions .primary{min-height:44px;padding:.55rem .75rem;font-size:.82rem}.task-add-actions .text-button{min-height:44px;font-size:.82rem}.admin-tabs{display:flex;gap:.25rem;margin:1.75rem 0 1.25rem;border-bottom:1px solid var(--line)}.admin-tabs button{min-height:44px;padding:.5rem .8rem;border-radius:8px 8px 0 0;background:transparent;color:var(--muted);font-size:.88rem}.admin-tabs button[aria-selected=true]{border-color:var(--line);border-bottom-color:var(--bg);background:var(--bg);color:var(--text);font-weight:720}
 .admin-pane-intro{max-width:56ch;margin:0 0 1.1rem;color:var(--muted);font-size:.9rem;line-height:1.5}
-/* The panel reuses the gallery's own tiles, so it needs nothing but a badge for
-   the two states an admin cares about. */
-.photo-admin-badge{position:absolute;z-index:4;top:.45rem;right:.45rem;padding:.16rem .5rem;border-radius:999px;background:oklch(20% .05 60 / .94);border:1px solid oklch(70% .14 76 / .55);color:oklch(94% .09 86);font-size:.7rem;font-weight:680;pointer-events:none}
-.photo-tile.has-admin-badge .photo-task-label{padding-right:5rem}
-.photo-tile.is-off-stream img{opacity:.38}
-.photo-tile.is-off-stream .photo-admin-badge{background:oklch(16% .01 88 / .95);border-color:var(--line);color:var(--muted)}
-.photo-actions{position:fixed;z-index:200;inset:0;display:grid;place-items:center;padding:1.25rem;background:oklch(6% .006 88 / .72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-.photo-actions-card{display:grid;gap:.6rem;width:min(22rem,100%);max-height:90dvh;overflow:auto;padding:1.1rem;border:1px solid var(--panel-line);border-radius:16px;background:var(--bg);text-align:center}
-.photo-actions-card img{display:block;width:100%;max-height:34dvh;object-fit:contain;border-radius:8px;background:var(--surface)}
-.photo-actions-card h2{margin:.2rem 0 0;font-size:1.1rem}
-#photo-actions-meta{margin:0 0 .35rem;font-size:.82rem}
-.photo-actions-card button{width:100%}
-#photo-actions-error:empty{display:none}
+/* The panel reuses the gallery's own tiles and lays the two decisions on top of
+   them, so an admin never leaves the spot they are looking at. The row sits
+   under any task label, which occupies the tile's top band. */
+.photo-tile-actions{position:absolute;z-index:5;right:.35rem;bottom:.35rem;left:.35rem;display:flex;gap:.35rem;justify-content:space-between;pointer-events:none}
+.photo-tile.has-tile-actions .photo-tile-meta{bottom:2.55rem}
+.tile-action{pointer-events:auto;min-height:30px;flex:1 1 0;min-width:0;padding:.22rem .3rem;border-radius:7px;border:1px solid oklch(70% .1 88 / .45);background:oklch(10% .01 88 / .82);color:oklch(92% .01 88);font-size:.68rem;font-weight:640;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+.tile-action:hover:not(:disabled){background:oklch(16% .02 88 / .92);border-color:var(--btn-text)}
+.tile-action.is-on{background:oklch(28% .09 62 / .92);border-color:oklch(78% .15 76 / .8);color:oklch(95% .1 88)}
+.tile-action.is-off{background:oklch(26% .02 88 / .92);border-color:var(--btn-line);color:var(--btn-text)}
+.photo-tile.is-off-stream img{opacity:.32}
+@media(max-width:700px){.tile-action{font-size:.64rem;min-height:28px;padding:.2rem .25rem}.photo-tile.has-tile-actions .photo-tile-meta{bottom:2.3rem}}
 .admin-pane-title{margin:1.6rem 0 0;font-size:1rem;font-weight:700}
 /* Written past the narrow-screen overrides further down, so these need the
    extra selector to keep the wider stream tiles at every width. */

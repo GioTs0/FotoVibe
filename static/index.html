@@ -10,8 +10,8 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js?v=raw-offline-upload-v7" type="module"></script>
+  <link rel="stylesheet" href="/static/style.css?v=stream-curation-v8">
+  <script src="/static/app.js?v=stream-curation-v8" type="module"></script>
 </head>
 <body>
   <div id="page-backdrop" class="page-backdrop" aria-hidden="true" hidden></div>
@@ -233,17 +233,6 @@
         <button id="send" class="capture-upload" type="button" disabled>Foto hochladen <span aria-hidden="true">↑</span></button>
       </div>
     </section>
-  </div>
-  <div id="photo-actions" class="photo-actions" hidden role="dialog" aria-modal="true" aria-labelledby="photo-actions-title">
-    <div class="photo-actions-card">
-      <img id="photo-actions-image" alt="">
-      <h2 id="photo-actions-title">Foto im Stream</h2>
-      <p id="photo-actions-meta" class="muted"></p>
-      <button id="photo-actions-hot" class="primary" type="button">Als Hot markieren</button>
-      <button id="photo-actions-hide" class="secondary" type="button">Vom Stream verstecken</button>
-      <p id="photo-actions-error" class="error" role="alert"></p>
-      <button id="photo-actions-close" class="text-button" type="button">Abbrechen</button>
-    </div>
   </div>
   <p id="queue-notice" class="queue-notice" role="status" aria-live="polite" hidden></p>
   <section id="queue-detail" class="queue-detail" role="dialog" aria-modal="true" aria-labelledby="queue-detail-title" hidden>

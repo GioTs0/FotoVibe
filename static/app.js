@@ -1006,10 +1006,6 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (!$('photo-actions').hidden) {
-    closePhotoActions();
-    return;
-  }
   if (!$('queue-detail').hidden) {
     closeQueueDetail();
     return;
@@ -1364,89 +1360,56 @@ function streamShapeOf(entry) {
 }
 
 function adminGridTile(photo, hotIds) {
-  // The gallery's own tile, so the panel looks exactly like the gallery on
-  // every screen size. Only what happens on a click differs.
-  const tile = photoButton(photo, () => openPhotoActions(photo));
-  const author = photo.author?.name;
-  tile.classList.toggle('is-off-stream', photo.in_stream === false);
-  tile.setAttribute(
-    'aria-label',
-    `${author ? `Foto von ${author}` : 'Foto'} bearbeiten: als Hot markieren oder vom Stream verstecken.`,
-  );
+  // The gallery's own tile, so the panel looks exactly like the gallery, with
+  // the two decisions laid straight on top of it. Acting where the photo sits
+  // beats opening anything: an admin scanning a wall of photos never loses
+  // their place.
+  const tile = document.createElement('div');
+  fillPhotoTile(tile, photo);
+  const onWall = photo.in_stream !== false;
+  tile.classList.toggle('is-off-stream', !onWall);
+  tile.classList.add('has-tile-actions');
+
+  const actions = document.createElement('div');
+  actions.className = 'photo-tile-actions';
+  const who = photo.author?.name ? `Foto von ${photo.author.name}` : 'Foto';
+
   // A photo can be hot without an admin touching it, because the party voted it
-  // up, so the badge reports what the wall actually does, not what was clicked.
-  const label = photo.in_stream === false
-    ? 'Nicht im Stream'
-    : hotIds.has(photo.id) ? '🔥 Hot' : '';
-  if (label) {
-    const badge = document.createElement('span');
-    badge.className = 'photo-admin-badge';
-    badge.textContent = label;
-    tile.append(badge);
-    tile.classList.add('has-admin-badge');
-  }
+  // up. The button lights up for what the wall actually does; pressing it
+  // toggles only the part an admin controls.
+  const isHot = hotIds.has(photo.id);
+  const hot = document.createElement('button');
+  hot.type = 'button';
+  hot.className = 'tile-action';
+  hot.classList.toggle('is-on', isHot);
+  hot.textContent = '🔥 Hot';
+  hot.setAttribute('aria-pressed', String(Boolean(photo.pinned)));
+  hot.setAttribute('aria-label', photo.pinned
+    ? `${who}: Hot-Markierung entfernen`
+    : `${who}: als Hot markieren`);
+  hot.addEventListener('click', async () => {
+    await pinPhotoToStream(photo.id, !photo.pinned, hot, $('admin-stream-status'));
+    await loadAdminStream();
+  });
+
+  const hide = document.createElement('button');
+  hide.type = 'button';
+  hide.className = 'tile-action';
+  hide.classList.toggle('is-off', !onWall);
+  hide.textContent = onWall ? 'Verstecken' : 'Zeigen';
+  hide.setAttribute('aria-pressed', String(!onWall));
+  hide.setAttribute('aria-label', onWall
+    ? `${who}: vom Stream verstecken`
+    : `${who}: wieder im Stream zeigen`);
+  hide.addEventListener('click', async () => {
+    await setPhotoOnStream(photo.id, !onWall, hide, $('admin-stream-status'));
+    await loadAdminStream();
+  });
+
+  actions.append(hot, hide);
+  tile.append(actions);
   return tile;
 }
-
-let photoActionsPhoto = null;
-let photoActionsReturnFocus = null;
-
-function closePhotoActions() {
-  $('photo-actions').hidden = true;
-  photoActionsPhoto = null;
-  $('photo-actions-error').textContent = '';
-  if (photoActionsReturnFocus?.isConnected) photoActionsReturnFocus.focus();
-  photoActionsReturnFocus = null;
-}
-
-function openPhotoActions(photo) {
-  if (!currentUser?.is_admin) return;
-  photoActionsPhoto = photo;
-  photoActionsReturnFocus = document.activeElement;
-  const author = photo.author?.name;
-  const score = streamScore(streamShapeOf(photo));
-  $('photo-actions-image').src = `/api/photos/${photo.id}/thumb`;
-  $('photo-actions-image').alt = '';
-  $('photo-actions-title').textContent = author ? `Foto von ${author}` : 'Foto';
-  $('photo-actions-meta').textContent = [
-    `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`,
-    photo.in_stream === false ? 'Nicht im Stream' : 'Läuft im Stream',
-  ].join(' · ');
-  $('photo-actions-hot').textContent = photo.pinned
-    ? 'Hot-Markierung entfernen'
-    : 'Als Hot markieren';
-  $('photo-actions-hide').textContent = photo.in_stream === false
-    ? 'Wieder im Stream zeigen'
-    : 'Vom Stream verstecken';
-  $('photo-actions-error').textContent = '';
-  $('photo-actions').hidden = false;
-  $('photo-actions-hot').focus();
-}
-
-async function runPhotoAction(action) {
-  const photo = photoActionsPhoto;
-  if (!photo) return;
-  const button = action === 'hot' ? $('photo-actions-hot') : $('photo-actions-hide');
-  const changed = action === 'hot'
-    ? await pinPhotoToStream(photo.id, !photo.pinned, button, $('photo-actions-error'))
-    : await setPhotoOnStream(photo.id, photo.in_stream === false, button, $('photo-actions-error'));
-  // The message target doubles as the error line, so a successful run says
-  // nothing there and simply closes.
-  const failed = action === 'hot'
-    ? changed === Boolean(photo.pinned)
-    : changed === (photo.in_stream !== false);
-  if (failed) return;
-  $('photo-actions-error').textContent = '';
-  closePhotoActions();
-  await loadAdminStream();
-}
-
-$('photo-actions-hot').addEventListener('click', () => runPhotoAction('hot'));
-$('photo-actions-hide').addEventListener('click', () => runPhotoAction('hide'));
-$('photo-actions-close').addEventListener('click', closePhotoActions);
-$('photo-actions').addEventListener('click', (event) => {
-  if (event.target === $('photo-actions')) closePhotoActions();
-});
 
 function adminStreamMatches(photo, query) {
   if (!query) return true;
@@ -1504,6 +1467,9 @@ const ADMIN_TABS = ['users', 'stream', 'tasks'];
 
 async function setAdminTab(tab) {
   adminTab = ADMIN_TABS.includes(tab) ? tab : 'users';
+  // Whatever went wrong belonged to the pane being left, so it must not follow
+  // the reader into the next one.
+  $('admin-error').textContent = '';
   for (const name of ADMIN_TABS) {
     $(`admin-${name}-tab`).setAttribute('aria-selected', String(name === adminTab));
     $(`admin-${name}-pane`).hidden = name !== adminTab;
@@ -2220,24 +2186,23 @@ async function loadDetailInteractions(photoId) {
   }
 }
 
-function photoButton(photo, onActivate) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'photo-tile';
-  button.dataset.photoId = photo.id;
+/** Fill any element with the gallery tile's contents. The admin panel needs the
+ * very same tile on a plain element, because it puts its own buttons on top and
+ * a button may not contain buttons. */
+function fillPhotoTile(element, photo) {
+  element.className = 'photo-tile';
+  element.dataset.photoId = photo.id;
   const width = Number(photo.width);
   const height = Number(photo.height);
   if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
-    button.style.setProperty('--gallery-photo-ratio', `${width} / ${height}`);
-    button.classList.add(width > height ? 'is-landscape' : width < height ? 'is-portrait' : 'is-square');
+    element.style.setProperty('--gallery-photo-ratio', `${width} / ${height}`);
+    element.classList.add(width > height ? 'is-landscape' : width < height ? 'is-portrait' : 'is-square');
   } else {
-    button.classList.add('is-portrait');
+    element.classList.add('is-portrait');
   }
   const date = new Date(photo.created_at).toLocaleString('de', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const task = photo.task || photo.metadata?.task;
   const author = photo.author || photo.metadata?.author;
-  const authorText = author?.name ? ` Hochgeladen von ${author.name}.` : '';
-  button.setAttribute('aria-label', task ? `Foto vom ${date} öffnen.${authorText} Aufgabe: ${task.text}` : `Foto vom ${date} öffnen.${authorText}`);
   const image = document.createElement('img');
   image.src = `/api/photos/${photo.id}/thumb`;
   image.alt = `Partyfoto vom ${date}`;
@@ -2247,9 +2212,9 @@ function photoButton(photo, onActivate) {
     const label = document.createElement('span');
     label.className = 'photo-task-label';
     label.textContent = task.text;
-    button.append(label);
+    element.append(label);
   }
-  button.append(image);
+  element.append(image);
   const meta = document.createElement('div');
   meta.className = 'photo-tile-meta';
   if (author?.name) {
@@ -2258,12 +2223,17 @@ function photoButton(photo, onActivate) {
     credit.textContent = author.name;
     meta.append(credit);
   }
-  button.append(meta);
-  renderTileInteractions(button, photo.interactions);
-  if (onActivate) {
-    button.addEventListener('click', () => onActivate(photo, button));
-    return button;
-  }
+  element.append(meta);
+  renderTileInteractions(element, photo.interactions);
+  return { date, task, author };
+}
+
+function photoButton(photo) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  const { date, task, author } = fillPhotoTile(button, photo);
+  const authorText = author?.name ? ` Hochgeladen von ${author.name}.` : '';
+  button.setAttribute('aria-label', task ? `Foto vom ${date} öffnen.${authorText} Aufgabe: ${task.text}` : `Foto vom ${date} öffnen.${authorText}`);
   button.addEventListener('click', () => {
     activeDetailPhoto = photo;
     detailButton = button;
