@@ -2,7 +2,7 @@ import io
 import warnings
 
 from fastapi import HTTPException
-from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageCms, ImageFilter, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 
 register_heif_opener(thumbnails=False)
@@ -15,6 +15,25 @@ FORMATS = {
     "WEBP": ("image/webp", "webp"),
     "HEIF": ("image/heic", "heic"),
 }
+# The stream shows a dozen photos receding into the distance and softens the far
+# ones. Doing that with a CSS blur costs a repaint every time perspective
+# rescales a card, which is visible as a flicker along the frames, so the blur is
+# baked into its own small derivative instead. It is only ever shown behind the
+# arriving photo, at a fraction of the screen, so it can be tiny.
+SOFT_EDGE = 256
+SOFT_BLUR = 8
+
+
+def soften(raw):
+    """Return the small, already blurred copy the stream shows in the distance."""
+    with Image.open(io.BytesIO(raw)) as source:
+        source.load()
+        source.thumbnail((SOFT_EDGE, SOFT_EDGE), Image.Resampling.LANCZOS)
+        blurred = source.convert("RGB").filter(ImageFilter.GaussianBlur(SOFT_BLUR))
+        output = io.BytesIO()
+        # Quality can be low: nothing here is ever in focus.
+        blurred.save(output, "JPEG", quality=68, optimize=True)
+        return output.getvalue()
 
 
 def derivatives(raw: bytes):
