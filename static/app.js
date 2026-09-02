@@ -1006,6 +1006,10 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  if (!$('photo-actions').hidden) {
+    closePhotoActions();
+    return;
+  }
   if (!$('queue-detail').hidden) {
     closeQueueDetail();
     return;
@@ -1344,137 +1348,135 @@ async function loadAdminTasks() {
   }
 }
 
-function adminStreamTile(photo, { hot = false, lazy = false } = {}) {
-  const item = document.createElement('figure');
-  item.className = 'admin-photo-preview admin-stream-item';
-  const image = document.createElement('img');
-  image.src = `/api/photos/${photo.id}/thumb`;
-  image.alt = '';
-  image.decoding = 'async';
-  if (lazy) image.loading = 'lazy';
-  const caption = document.createElement('figcaption');
-  const flag = document.createElement('span');
-  flag.className = 'admin-stream-flag';
-  const score = streamScore(photo);
-  flag.textContent = hot
-    ? (photo.pinned ? '🔥 Hot · angepinnt' : '🔥 Hot')
-    : (photo.author || 'Ohne Namen');
-  const detail = document.createElement('span');
-  detail.className = 'admin-stream-detail';
-  detail.textContent = hot
-    ? [photo.author || 'Ohne Namen', `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`].join(' · ')
-    : `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`;
-  caption.append(flag, detail);
-  const action = document.createElement('button');
-  action.type = 'button';
-  action.className = 'secondary admin-preview-hide';
-  action.textContent = pinLabel(Boolean(photo.pinned));
-  action.setAttribute('aria-pressed', String(Boolean(photo.pinned)));
-  action.addEventListener('click', async () => {
-    await pinPhotoToStream(photo.id, !photo.pinned, action, $('admin-stream-status'));
-    await loadAdminStream();
-  });
-  item.append(image, caption, action);
-  return item;
+/** The gallery entry as the wall sees it, so both rank photos identically. */
+function streamShapeOf(entry) {
+  const interactions = entry.interactions || {};
+  return {
+    id: entry.id,
+    created_at: entry.created_at,
+    task: (entry.task || {}).text,
+    author: (entry.author || {}).name,
+    reactions: interactions.reactions || [],
+    comments: interactions.comments_count || 0,
+    pinned: Boolean(entry.pinned),
+    in_stream: entry.in_stream !== false,
+  };
 }
 
 function adminGridTile(photo, hotIds) {
-  const item = document.createElement('figure');
-  item.className = 'admin-grid-item';
-  item.classList.toggle('is-off-stream', photo.in_stream === false);
-  const shot = document.createElement('div');
-  shot.className = 'admin-grid-shot';
-  const image = document.createElement('img');
-  image.src = `/api/photos/${photo.id}/thumb`;
-  image.alt = '';
-  image.loading = 'lazy';
-  image.decoding = 'async';
-  shot.append(image);
-  // A photo can be hot without being pinned, because the party voted it up, so
-  // the badge reports what the wall actually does rather than what was clicked.
-  const isHot = hotIds.has(photo.id);
-  if (isHot || photo.in_stream === false) {
+  // The gallery's own tile, so the panel looks exactly like the gallery on
+  // every screen size. Only what happens on a click differs.
+  const tile = photoButton(photo, () => openPhotoActions(photo));
+  const author = photo.author?.name;
+  tile.classList.toggle('is-off-stream', photo.in_stream === false);
+  tile.setAttribute(
+    'aria-label',
+    `${author ? `Foto von ${author}` : 'Foto'} bearbeiten: als Hot markieren oder vom Stream verstecken.`,
+  );
+  // A photo can be hot without an admin touching it, because the party voted it
+  // up, so the badge reports what the wall actually does, not what was clicked.
+  const label = photo.in_stream === false
+    ? 'Nicht im Stream'
+    : hotIds.has(photo.id) ? '🔥 Hot' : '';
+  if (label) {
     const badge = document.createElement('span');
-    badge.className = 'admin-grid-badge';
-    badge.textContent = photo.in_stream === false ? 'Nicht im Stream' : '🔥 Hot';
-    shot.append(badge);
+    badge.className = 'photo-admin-badge';
+    badge.textContent = label;
+    tile.append(badge);
+    tile.classList.add('has-admin-badge');
   }
-  const caption = document.createElement('figcaption');
-  const score = streamScore(photo);
-  caption.textContent = [
-    photo.author || 'Ohne Namen',
-    `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`,
-  ].join(' · ');
-  const actions = document.createElement('div');
-  actions.className = 'admin-grid-actions';
-
-  const hot = document.createElement('button');
-  hot.type = 'button';
-  hot.className = 'secondary admin-grid-toggle';
-  hot.textContent = photo.pinned ? '🔥 Hot' : 'Als Hot';
-  hot.setAttribute('aria-pressed', String(Boolean(photo.pinned)));
-  hot.setAttribute('aria-label', photo.pinned
-    ? `${photo.author || 'Foto'} nicht mehr als Hot markieren`
-    : `${photo.author || 'Foto'} als Hot markieren`);
-  // Pinning still means something for a photo that is hot on votes alone:
-  // reactions shift all evening, a pin does not.
-  hot.title = photo.pinned
-    ? 'Bleibt hot, bis ihr es wieder abwählt.'
-    : 'Macht das Foto dauerhaft hot, unabhängig von den Reaktionen.';
-  hot.addEventListener('click', async () => {
-    await pinPhotoToStream(photo.id, !photo.pinned, hot, $('admin-stream-status'));
-    await loadAdminStream();
-  });
-
-  const onStream = document.createElement('button');
-  onStream.type = 'button';
-  onStream.className = 'secondary admin-grid-toggle';
-  onStream.textContent = photo.in_stream === false ? 'Zurück' : 'Verstecken';
-  onStream.setAttribute('aria-pressed', String(photo.in_stream === false));
-  onStream.setAttribute('aria-label', `${photo.author || 'Foto'} vom Stream nehmen`);
-  onStream.addEventListener('click', async () => {
-    await setPhotoOnStream(photo.id, photo.in_stream === false, onStream, $('admin-stream-status'));
-    await loadAdminStream();
-  });
-
-  actions.append(hot, onStream);
-  item.append(shot, caption, actions);
-  return item;
+  return tile;
 }
+
+let photoActionsPhoto = null;
+let photoActionsReturnFocus = null;
+
+function closePhotoActions() {
+  $('photo-actions').hidden = true;
+  photoActionsPhoto = null;
+  $('photo-actions-error').textContent = '';
+  if (photoActionsReturnFocus?.isConnected) photoActionsReturnFocus.focus();
+  photoActionsReturnFocus = null;
+}
+
+function openPhotoActions(photo) {
+  if (!currentUser?.is_admin) return;
+  photoActionsPhoto = photo;
+  photoActionsReturnFocus = document.activeElement;
+  const author = photo.author?.name;
+  const score = streamScore(streamShapeOf(photo));
+  $('photo-actions-image').src = `/api/photos/${photo.id}/thumb`;
+  $('photo-actions-image').alt = '';
+  $('photo-actions-title').textContent = author ? `Foto von ${author}` : 'Foto';
+  $('photo-actions-meta').textContent = [
+    `${score} ${score === 1 ? 'Punkt' : 'Punkte'}`,
+    photo.in_stream === false ? 'Nicht im Stream' : 'Läuft im Stream',
+  ].join(' · ');
+  $('photo-actions-hot').textContent = photo.pinned
+    ? 'Hot-Markierung entfernen'
+    : 'Als Hot markieren';
+  $('photo-actions-hide').textContent = photo.in_stream === false
+    ? 'Wieder im Stream zeigen'
+    : 'Vom Stream verstecken';
+  $('photo-actions-error').textContent = '';
+  $('photo-actions').hidden = false;
+  $('photo-actions-hot').focus();
+}
+
+async function runPhotoAction(action) {
+  const photo = photoActionsPhoto;
+  if (!photo) return;
+  const button = action === 'hot' ? $('photo-actions-hot') : $('photo-actions-hide');
+  const changed = action === 'hot'
+    ? await pinPhotoToStream(photo.id, !photo.pinned, button, $('photo-actions-error'))
+    : await setPhotoOnStream(photo.id, photo.in_stream === false, button, $('photo-actions-error'));
+  // The message target doubles as the error line, so a successful run says
+  // nothing there and simply closes.
+  const failed = action === 'hot'
+    ? changed === Boolean(photo.pinned)
+    : changed === (photo.in_stream !== false);
+  if (failed) return;
+  $('photo-actions-error').textContent = '';
+  closePhotoActions();
+  await loadAdminStream();
+}
+
+$('photo-actions-hot').addEventListener('click', () => runPhotoAction('hot'));
+$('photo-actions-hide').addEventListener('click', () => runPhotoAction('hide'));
+$('photo-actions-close').addEventListener('click', closePhotoActions);
+$('photo-actions').addEventListener('click', (event) => {
+  if (event.target === $('photo-actions')) closePhotoActions();
+});
 
 function adminStreamMatches(photo, query) {
   if (!query) return true;
-  const haystack = `${photo.author || ''} ${photo.task || ''}`.toLowerCase();
+  const haystack = `${photo.author?.name || ''} ${photo.task?.text || ''}`.toLowerCase();
   return query.split(/\s+/).every((word) => haystack.includes(word));
 }
 
 function renderAdminStream(list) {
-  // The hot list comes from the same function the wall uses, on the same photos
-  // the wall gets, so what an admin reads here is exactly what it shows.
-  const running = list.filter((photo) => photo.in_stream !== false);
+  // Ranked by the same function the wall uses, on the same photos the wall
+  // gets, so what an admin reads here is exactly what it shows.
+  const running = list.filter((photo) => photo.in_stream !== false).map(streamShapeOf);
   const highlights = streamHighlights(running);
   $('admin-stream-summary').hidden = false;
   $('admin-stream-summary').replaceChildren(
-    adminMetric('Im Stream', running.length),
-    adminMetric('Gerade hot', highlights.length),
-    adminMetric('Versteckt', list.length - running.length),
-  );
-  $('admin-stream-empty').hidden = highlights.length > 0;
-  $('admin-stream-highlights').replaceChildren(
-    ...highlights.map((photo) => adminStreamTile(photo, { hot: true })),
+    adminMetric('Fotos im Stream', running.length),
+    adminMetric('Hot', highlights.length),
+    adminMetric('Admin Hot', list.filter((photo) => photo.pinned).length),
   );
 
   // Every photo is here, not only the ones already hot: marking one is how an
   // admin makes it hot in the first place. Hot and best-scoring first, then the
   // rest, so the interesting end of the party is at the top.
   const query = adminStreamQuery.trim().toLowerCase();
+  const hotIds = new Set(highlights.map((photo) => photo.id));
   const all = list
     .filter((photo) => adminStreamMatches(photo, query))
-    .sort((left, right) => Number(right.pinned) - Number(left.pinned)
-      || streamScore(right) - streamScore(left)
+    .sort((left, right) => Number(hotIds.has(right.id)) - Number(hotIds.has(left.id))
+      || streamScore(streamShapeOf(right)) - streamScore(streamShapeOf(left))
       || right.created_at.localeCompare(left.created_at));
   $('admin-stream-none').hidden = all.length > 0;
-  const hotIds = new Set(highlights.map((photo) => photo.id));
   $('admin-stream-all').replaceChildren(...all.map((photo) => adminGridTile(photo, hotIds)));
 }
 
@@ -2218,7 +2220,7 @@ async function loadDetailInteractions(photoId) {
   }
 }
 
-function photoButton(photo) {
+function photoButton(photo, onActivate) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'photo-tile';
@@ -2258,6 +2260,10 @@ function photoButton(photo) {
   }
   button.append(meta);
   renderTileInteractions(button, photo.interactions);
+  if (onActivate) {
+    button.addEventListener('click', () => onActivate(photo, button));
+    return button;
+  }
   button.addEventListener('click', () => {
     activeDetailPhoto = photo;
     detailButton = button;

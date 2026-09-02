@@ -1360,17 +1360,19 @@ def create_app(settings=None, store=None, task_store=None):
 
     @app.get("/api/admin/photos")
     def admin_photos(request: Request):
-        """Every gallery photo with the two switches an admin has over the wall.
+        """Every gallery photo, in the gallery's own shape, all at once.
 
         The wall's own list leaves out whatever was taken off it, so the panel
-        cannot use it: an admin has to see a photo in order to put it back.
+        cannot use it: an admin has to see a photo in order to put it back. The
+        full shape is what the panel wants anyway, because it draws the same
+        tiles the gallery does, and it carries both switches already.
         """
         require_admin(request)
         with cache_lock:
             if cache["until"] <= time.monotonic():
                 cache.update(photos=gallery_entries(), until=time.monotonic() + 5)
             entries = cache["photos"]
-        return {"photos": [stream_photo(entry) for entry in entries]}
+        return {"photos": entries}
 
     @app.get("/api/photos/{photo_id}/interactions")
     def photo_interactions(request: Request, photo_id: str):
